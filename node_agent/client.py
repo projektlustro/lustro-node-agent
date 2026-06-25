@@ -1,11 +1,17 @@
 """Work-unit client: pull -> verify -> classify -> sign -> POST result.
 
+Implements the FROZEN wu contract (`packages/shared-types`):
+  GET  /v1/wu              -> WorkUnit  {wu_id, kind, payload, core_pubkey_id, core_sig}
+  POST /v1/wu/{id}/result  <- WorkUnitResult {labels, score, agent_pubkey, agent_sig}
+
 Flow:
   1. GET `{edge}/v1/wu` for the next work unit.
-  2. Verify the WU's `core_sig` against the PINNED core key (`core_pin`).
-  3. Anti-replay: reject WUs whose nonce/wu_id has already been seen.
-  4. Classify the content via the configured `Classifier`.
-  5. Sign the result with the LOCAL agent key (`keys`).
+  2. Verify the WU's `core_sig` against the PINNED core key (`core_pin`),
+     rejecting on key-id mismatch or bad signature.
+  3. Anti-replay: reject WUs whose `wu_id` (or, if present, `nonce`) was seen.
+  4. Classify the payload via the configured `Classifier`.
+  5. Sign the result with the LOCAL agent key (`keys`) — the private key never
+     leaves this process and is never put in the body.
   6. POST `{edge}/v1/wu/{id}/result`.
 
 Every step is recorded to the JobLog. All network calls go through the
@@ -13,28 +19,33 @@ Every step is recorded to the JobLog. All network calls go through the
 """
 
 import base64
+import binascii
 import json
 
 import httpx
 
 from node_agent.classifier import Classifier
-from node_agent.core_pin import verify_wu_signature
+from node_agent.core_pin import CorePinError, verify_wu_signature
 from node_agent.egress import EgressGuard
 from node_agent.joblog import JobLog
 from node_agent.keys import AgentKeys
 
+# Fields that are part of the core's signature envelope, not the signed body.
+_SIG_ENVELOPE_FIELDS = ("core_sig", "core_pubkey_id")
+
 
 class ReplayError(Exception):
-    """Raised when a work unit nonce / wu_id has already been processed."""
+    """Raised when a work unit wu_id / nonce has already been processed."""
 
 
-def _canonical_wu_bytes(wu: dict) -> bytes:
+def canonical_wu_bytes(wu: dict) -> bytes:
     """Canonical byte serialization of the signed portion of a work unit.
 
-    The core signs the WU minus its own signature envelope. We reconstruct the
-    same bytes deterministically (sorted keys) for verification.
+    The core signs the WU minus its own signature envelope (`core_sig` and
+    `core_pubkey_id`). We reconstruct the same bytes deterministically (sorted
+    keys, no whitespace) for verification.
     """
-    signed = {k: v for k, v in wu.items() if k not in ("core_sig", "core_key_id")}
+    signed = {k: v for k, v in wu.items() if k not in _SIG_ENVELOPE_FIELDS}
     return json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -51,57 +62,94 @@ class NodeAgentClient:
         self._classifier = classifier
         self._keys = keys
         self._joblog = joblog
-        self._seen_nonces: set[str] = set()
         self._seen_wu_ids: set[str] = set()
+        self._seen_nonces: set[str] = set()
 
     def _seen(self, wu: dict) -> bool:
+        wu_id = wu.get("wu_id")
         nonce = wu.get("nonce")
-        wu_id = wu.get("id")
-        return (nonce is not None and nonce in self._seen_nonces) or (
-            wu_id is not None and wu_id in self._seen_wu_ids
+        return (wu_id is not None and wu_id in self._seen_wu_ids) or (
+            nonce is not None and nonce in self._seen_nonces
         )
 
     def _mark_seen(self, wu: dict) -> None:
+        if wu.get("wu_id") is not None:
+            self._seen_wu_ids.add(wu["wu_id"])
         if wu.get("nonce") is not None:
             self._seen_nonces.add(wu["nonce"])
-        if wu.get("id") is not None:
-            self._seen_wu_ids.add(wu["id"])
+
+    @staticmethod
+    def _payload_text(payload: object) -> str:
+        """Extract the classifiable text from a WU payload.
+
+        Payload is `unknown` in the contract; the text kind carries `{text: ...}`.
+        """
+        if isinstance(payload, dict):
+            return str(payload.get("text", ""))
+        if isinstance(payload, str):
+            return payload
+        return ""
+
+    @staticmethod
+    def _payload_lang(payload: object) -> str | None:
+        if isinstance(payload, dict) and payload.get("lang") is not None:
+            return str(payload["lang"])
+        return None
 
     def process_wu(self, wu: dict, http: httpx.Client | None = None) -> dict:
-        """Verify, classify, sign and submit a single work unit."""
-        wu_id = wu.get("id")
+        """Verify, classify, sign and submit a single work unit.
+
+        Returns the posted `WorkUnitResult` body.
+        """
+        wu_id = wu.get("wu_id")
+
+        # The contract makes wu_id required; reject a missing/empty one rather
+        # than building a bogus '/v1/wu/None/result' URL or an unkeyed result.
+        if not wu_id:
+            raise CorePinError("work unit missing wu_id")
 
         # Anti-replay before doing any work.
         if self._seen(wu):
             self._joblog.append({"event": "replay_rejected", "wu_id": wu_id})
             raise ReplayError(f"work unit already processed: {wu_id}")
 
-        # Verify the core signature against the pinned key.
-        core_sig = base64.b64decode(wu["core_sig"])
+        # Verify the core signature against the pinned key. A missing or
+        # malformed signature envelope is an unverifiable WU -> CorePinError
+        # (never an uncaught crash on adversary-influenced edge JSON). We do NOT
+        # mark it seen, so a legitimate retry of a rejected WU is still possible.
+        try:
+            core_sig = base64.b64decode(wu["core_sig"], validate=True)
+        except (KeyError, binascii.Error, ValueError) as e:
+            raise CorePinError("work unit core_sig missing or malformed") from e
         verify_wu_signature(
-            _canonical_wu_bytes(wu),
+            canonical_wu_bytes(wu),
             core_sig,
-            wu.get("core_key_id", ""),
+            wu.get("core_pubkey_id", ""),
         )
-        self._mark_seen(wu)
 
-        # Classify.
-        result = self._classifier.classify(wu.get("content", ""), wu.get("lang"))
+        # Classify the payload.
+        payload = wu.get("payload")
+        result = self._classifier.classify(
+            self._payload_text(payload), self._payload_lang(payload)
+        )
 
-        # Sign the result with the local agent key.
-        result_payload = {
-            "wu_id": wu_id,
-            "label": result.label,
-            "score": result.score,
-        }
+        # Sign the result with the LOCAL agent key. The signed bytes bind the
+        # labels + score to this wu_id; the private key never enters the body.
+        labels = [result.label]
+        signed_payload = {"wu_id": wu_id, "labels": labels, "score": result.score}
         result_bytes = json.dumps(
-            result_payload, sort_keys=True, separators=(",", ":")
+            signed_payload, sort_keys=True, separators=(",", ":")
         ).encode()
         agent_sig = base64.b64encode(self._keys.sign(result_bytes)).decode()
+
+        # FROZEN WorkUnitResult shape — exactly these four fields. labels/score
+        # are reused verbatim from the signed payload so the bytes we signed and
+        # the body we POST can never drift apart.
         body = {
-            **result_payload,
-            "agent_sig": agent_sig,
+            "labels": labels,
+            "score": result.score,
             "agent_pubkey": self._keys.public_key_pem().decode(),
+            "agent_sig": agent_sig,
         }
 
         url = self._egress.check(f"{self._edge}/v1/wu/{wu_id}/result")
@@ -113,19 +161,24 @@ class NodeAgentClient:
             if owns_client:
                 client.close()
 
+        # Mark seen only AFTER a successful POST: a transient delivery failure
+        # raises above and leaves the WU eligible for a later retry, rather than
+        # being silently dropped as "already processed".
+        self._mark_seen(wu)
         self._joblog.append(
-            {"event": "wu_processed", "wu_id": wu_id, "label": result.label}
+            {"event": "wu_processed", "wu_id": wu_id, "labels": body["labels"]}
         )
         return body
 
     def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
-        """Pull one WU from the edge and process it; None if no work."""
+        """Pull one WU from the edge and process it; None if no work (204)."""
         url = self._egress.check(f"{self._edge}/v1/wu")
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:
             resp = client.get(url)
             if resp.status_code == 204:
+                self._joblog.append({"event": "no_work"})
                 return None
             wu = resp.json()
             return self.process_wu(wu, http=client)
