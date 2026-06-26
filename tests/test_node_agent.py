@@ -17,7 +17,6 @@ import base64
 import json
 
 import pytest
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -77,18 +76,18 @@ def test_core_cannot_mint_the_agent_key(tmp_path, monkeypatch):
     result still carries the LOCALLY-generated agent pubkey.
     """
     priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = ensure_keypair(tmp_path / "agent.key")
-    local_pub = keys.public_key_pem().decode()
+    # agent_pubkey is posted as base64 of the raw 32-byte public key.
+    local_pub = keys.public_key_raw_b64()
 
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier("benign", 0.1), keys,
         JobLog(tmp_path / "joblog.jsonl"),
     )
     attacker_key = Ed25519PrivateKey.generate()
-    attacker_pub = attacker_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    attacker_pub = base64.b64encode(
+        attacker_key.public_key().public_bytes_raw()
     ).decode()
     # Smuggle the attacker pubkey INSIDE the (validly) core-signed WU, so the
     # core itself is trying to dictate the agent key. The agent must ignore it.
@@ -112,55 +111,53 @@ def test_private_key_file_permissions(tmp_path):
 # --- core_pin: rejects wrong pinned key / bad sig ---
 
 def _make_core():
+    """Return (private_key, base64-raw-public-key) — the raw form agents pin."""
     priv = Ed25519PrivateKey.generate()
-    pem = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return priv, pem
+    raw_b64 = base64.b64encode(priv.public_key().public_bytes_raw()).decode()
+    return priv, raw_b64
 
 
 def test_core_sig_verifies_with_pinned_key():
     priv, pem = _make_core()
-    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}}
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
     verify_wu_signature(
         canonical_wu_bytes(wu), sig, "lustro-core-key-v1",
-        pinned_key_id="lustro-core-key-v1", pinned_public_key_pem=pem,
+        pinned_key_id="lustro-core-key-v1", pinned_public_key_b64=pem,
     )
 
 
 def test_core_sig_rejects_wrong_key_id():
     priv, pem = _make_core()
-    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}}
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
     with pytest.raises(CorePinError):
         verify_wu_signature(
             canonical_wu_bytes(wu), sig, "some-other-key",
-            pinned_key_id="lustro-core-key-v1", pinned_public_key_pem=pem,
+            pinned_key_id="lustro-core-key-v1", pinned_public_key_b64=pem,
         )
 
 
 def test_core_sig_rejects_wrong_signing_key():
     _, pem = _make_core()
     attacker = Ed25519PrivateKey.generate()
-    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}}
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}, "core_pubkey_id": "lustro-core-key-v1"}
     sig = attacker.sign(canonical_wu_bytes(wu))
     with pytest.raises(CorePinError):
         verify_wu_signature(
             canonical_wu_bytes(wu), sig, "lustro-core-key-v1",
-            pinned_key_id="lustro-core-key-v1", pinned_public_key_pem=pem,
+            pinned_key_id="lustro-core-key-v1", pinned_public_key_b64=pem,
         )
 
 
 def test_core_sig_fails_closed_with_no_pinned_key():
     priv, _ = _make_core()
-    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}}
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"}, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
     with pytest.raises(CorePinError):
         verify_wu_signature(
             canonical_wu_bytes(wu), sig, "lustro-core-key-v1",
-            pinned_key_id="lustro-core-key-v1", pinned_public_key_pem=b"",
+            pinned_key_id="lustro-core-key-v1", pinned_public_key_b64="",
         )
 
 
@@ -203,12 +200,11 @@ def _agent_keys(tmp_path):
 
 
 def _signed_wu(priv, wu):
+    # core_pubkey_id is part of the signed canonical body, so set it BEFORE
+    # signing (the core signs over {wu_id,kind,payload,core_pubkey_id}).
+    wu = {**wu, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
-    return {
-        **wu,
-        "core_sig": base64.b64encode(sig).decode(),
-        "core_pubkey_id": "lustro-core-key-v1",
-    }
+    return {**wu, "core_sig": base64.b64encode(sig).decode()}
 
 
 class _FakeHttp:
@@ -244,7 +240,7 @@ class _FakeHttp:
 
 def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
     priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
     client = NodeAgentClient(
@@ -262,15 +258,16 @@ def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
     assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig"}
     assert out["labels"] == ["disinfo"]
     assert out["score"] == 0.91
-    assert out["agent_pubkey"] == keys.public_key_pem().decode()
+    # agent_pubkey is base64 of the raw 32-byte public key (core wire format).
+    assert out["agent_pubkey"] == keys.public_key_raw_b64()
 
     # The agent signature verifies against the agent's local public key.
     signed_bytes = json.dumps(
         {"wu_id": "wu-1", "labels": out["labels"], "score": out["score"]},
         sort_keys=True, separators=(",", ":"),
     ).encode()
-    pub: Ed25519PublicKey = serialization.load_pem_public_key(
-        out["agent_pubkey"].encode()
+    pub: Ed25519PublicKey = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(out["agent_pubkey"])
     )
     pub.verify(base64.b64decode(out["agent_sig"]), signed_bytes)
 
@@ -285,7 +282,7 @@ def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
 
 def test_pull_returns_none_when_no_work(tmp_path, monkeypatch):
     _, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
@@ -298,7 +295,7 @@ def test_pull_returns_none_when_no_work(tmp_path, monkeypatch):
 
 def test_anti_replay_rejects_repeated_wu_id(tmp_path, monkeypatch):
     priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
 
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
@@ -326,7 +323,7 @@ def test_anti_replay_rejects_repeated_nonce(tmp_path, monkeypatch):
     """If a WU carries an explicit nonce, a repeated nonce is also rejected
     even when the wu_id differs (defence in depth)."""
     priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
@@ -346,17 +343,19 @@ def test_anti_replay_rejects_repeated_nonce(tmp_path, monkeypatch):
 
 def test_client_rejects_unsigned_wu(tmp_path, monkeypatch):
     _, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
         JobLog(tmp_path / "joblog.jsonl"),
     )
     attacker = Ed25519PrivateKey.generate()
-    base = {"wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}}
+    base = {
+        "wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"},
+        "core_pubkey_id": "lustro-core-key-v1",
+    }
     wu = {
         **base,
-        "core_pubkey_id": "lustro-core-key-v1",
         "core_sig": base64.b64encode(
             attacker.sign(canonical_wu_bytes(base))
         ).decode(),
@@ -374,7 +373,7 @@ def test_client_egress_bound_to_edge(tmp_path):
 
 def test_missing_core_sig_is_rejected_not_crash(tmp_path, monkeypatch):
     _, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
@@ -388,7 +387,7 @@ def test_missing_core_sig_is_rejected_not_crash(tmp_path, monkeypatch):
 
 def test_malformed_core_sig_is_rejected_not_crash(tmp_path, monkeypatch):
     _, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
@@ -401,14 +400,19 @@ def test_malformed_core_sig_is_rejected_not_crash(tmp_path, monkeypatch):
 
 
 def test_missing_wu_id_is_rejected(tmp_path, monkeypatch):
-    priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
         JobLog(tmp_path / "j.jsonl"),
     )
-    wu = _signed_wu(priv, {"kind": "text", "payload": {"text": "hi"}})  # no wu_id
+    # No wu_id: process_wu must reject it up front (before signature checks),
+    # so we don't (and can't) compute a canonical signature over it.
+    wu = {
+        "kind": "text", "payload": {"text": "hi"},
+        "core_pubkey_id": "lustro-core-key-v1", "core_sig": "",
+    }
     with pytest.raises(CorePinError):
         client.process_wu(wu, http=_FakeHttp())
 
@@ -416,7 +420,7 @@ def test_missing_wu_id_is_rejected(tmp_path, monkeypatch):
 def test_wu_not_marked_seen_when_post_fails(tmp_path, monkeypatch):
     """A transient POST failure must NOT consume the WU: a later retry succeeds."""
     priv, pem = _make_core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
     client = NodeAgentClient(
         "https://edge.example.com", StubClassifier("bad", 0.9), keys,

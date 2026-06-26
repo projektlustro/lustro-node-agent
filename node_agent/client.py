@@ -30,10 +30,6 @@ from node_agent.egress import EgressGuard
 from node_agent.joblog import JobLog
 from node_agent.keys import AgentKeys
 
-# Fields that are part of the core's signature envelope, not the signed body.
-_SIG_ENVELOPE_FIELDS = ("core_sig", "core_pubkey_id")
-
-
 class ReplayError(Exception):
     """Raised when a work unit wu_id / nonce has already been processed."""
 
@@ -41,12 +37,24 @@ class ReplayError(Exception):
 def canonical_wu_bytes(wu: dict) -> bytes:
     """Canonical byte serialization of the signed portion of a work unit.
 
-    The core signs the WU minus its own signature envelope (`core_sig` and
-    `core_pubkey_id`). We reconstruct the same bytes deterministically (sorted
-    keys, no whitespace) for verification.
+    MUST stay byte-for-byte identical to ``services/core/app/wu_canonical.py``
+    (``canonical_wu_bytes``) — the core signs these bytes and this agent
+    verifies them. The signed body covers ``wu_id``, ``kind``, ``payload`` and
+    ``core_pubkey_id`` (only ``core_sig`` is excluded), with sorted keys, no
+    insignificant whitespace, and ``ensure_ascii=False`` so non-ASCII payloads
+    (e.g. Polish text) hash identically on both sides.
     """
-    signed = {k: v for k, v in wu.items() if k not in _SIG_ENVELOPE_FIELDS}
-    return json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()
+    return json.dumps(
+        {
+            "wu_id": wu["wu_id"],
+            "kind": wu["kind"],
+            "payload": wu["payload"],
+            "core_pubkey_id": wu["core_pubkey_id"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 class NodeAgentClient:
@@ -135,11 +143,15 @@ class NodeAgentClient:
 
         # Sign the result with the LOCAL agent key. The signed bytes bind the
         # labels + score to this wu_id; the private key never enters the body.
+        # MUST match services/core/app/wu_canonical.py (canonical_result_bytes):
+        # score coerced to float and ensure_ascii=False, so an integer score or
+        # a non-ASCII label still verifies on the core.
         labels = [result.label]
-        signed_payload = {"wu_id": wu_id, "labels": labels, "score": result.score}
+        score = float(result.score)
+        signed_payload = {"wu_id": wu_id, "labels": labels, "score": score}
         result_bytes = json.dumps(
-            signed_payload, sort_keys=True, separators=(",", ":")
-        ).encode()
+            signed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
         agent_sig = base64.b64encode(self._keys.sign(result_bytes)).decode()
 
         # FROZEN WorkUnitResult shape — exactly these four fields. labels/score
@@ -147,8 +159,8 @@ class NodeAgentClient:
         # the body we POST can never drift apart.
         body = {
             "labels": labels,
-            "score": result.score,
-            "agent_pubkey": self._keys.public_key_pem().decode(),
+            "score": score,
+            "agent_pubkey": self._keys.public_key_raw_b64(),
             "agent_sig": agent_sig,
         }
 

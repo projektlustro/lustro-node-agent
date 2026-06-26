@@ -11,7 +11,6 @@ import json
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -28,26 +27,23 @@ EDGE = "https://edge.lustro.test"
 
 
 def _core():
+    """Return (private_key, base64-raw-public-key) — the raw form agents pin."""
     priv = Ed25519PrivateKey.generate()
-    pem = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return priv, pem
+    raw_b64 = base64.b64encode(priv.public_key().public_bytes_raw()).decode()
+    return priv, raw_b64
 
 
 def _signed_wu(priv, wu):
+    # core_pubkey_id is part of the signed canonical body, so set it BEFORE
+    # signing (the core signs over {wu_id,kind,payload,core_pubkey_id}).
+    wu = {**wu, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
-    return {
-        **wu,
-        "core_sig": base64.b64encode(sig).decode(),
-        "core_pubkey_id": "lustro-core-key-v1",
-    }
+    return {**wu, "core_sig": base64.b64encode(sig).decode()}
 
 
 def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     priv, pem = _core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
 
     wu = _signed_wu(priv, {
         "wu_id": "wu-42", "kind": "text",
@@ -85,13 +81,13 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
 
     # The agent signature verifies against the LOCAL agent public key, and that
     # public key is the one we generated locally (the core never minted it).
-    assert body["agent_pubkey"] == keys.public_key_pem().decode()
+    assert body["agent_pubkey"] == keys.public_key_raw_b64()
     signed_bytes = json.dumps(
         {"wu_id": "wu-42", "labels": body["labels"], "score": body["score"]},
         sort_keys=True, separators=(",", ":"),
     ).encode()
-    pub: Ed25519PublicKey = serialization.load_pem_public_key(
-        body["agent_pubkey"].encode()
+    pub: Ed25519PublicKey = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(body["agent_pubkey"])
     )
     pub.verify(base64.b64decode(body["agent_sig"]), signed_bytes)
 
@@ -114,7 +110,7 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
 def test_e2e_egress_blocks_offhost_with_real_client(tmp_path, monkeypatch):
     """A WU cannot make the agent POST to a non-allowlisted host."""
     _, pem = _core()
-    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_PEM", pem)
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = ensure_keypair(tmp_path / "agent.key")
     client = NodeAgentClient(EDGE, StubClassifier(), keys, JobLog(tmp_path / "j.jsonl"))
     with pytest.raises(EgressViolation):
