@@ -16,6 +16,7 @@ here it is a config constant the volunteer can audit.
 """
 
 import base64
+import os
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -24,11 +25,24 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 # key id is rejected.
 PINNED_CORE_KEY_ID = "lustro-core-key-v1"
 
-# Base64 of the pinned core public key's raw 32 bytes. Replaced at release time
-# with the real core public key (cosign-verified). Empty by default —
-# `verify_wu_signature` requires it to be set, so an unconfigured build fails
-# closed.
-PINNED_CORE_PUBLIC_KEY_B64: str = ""
+# Base64 of the pinned core public key's raw 32 bytes.
+#
+# Dev builds ship with a real keypair so the WU pipeline works end-to-end
+# out-of-the-box.  Production builds override this at release time via
+# `LUSTRO_NODE_AGENT_PINNED_KEY_B64` (preferred) or by patching this constant.
+# An empty value still triggers the fail-closed behaviour in
+# `verify_wu_signature`.
+_DEV_CORE_PUBLIC_KEY_B64 = "3xr2nMlHr2Lj+WMO+vZ09gIgUeSDk7d2HxW4UZ3ymOg="
+PINNED_CORE_PUBLIC_KEY_B64: str = _DEV_CORE_PUBLIC_KEY_B64
+
+# Env-var override so prod deployments (and tests) can swap the key without
+# editing source.
+_ENV_KEY = "LUSTRO_NODE_AGENT_PINNED_KEY_B64"
+
+
+def _effective_pinned_key() -> str:
+    """Return the pinned key, preferring the env override over the baked-in dev key."""
+    return os.environ.get(_ENV_KEY, PINNED_CORE_PUBLIC_KEY_B64)
 
 
 class CorePinError(Exception):
@@ -66,7 +80,7 @@ def verify_wu_signature(
     raw_b64 = (
         pinned_public_key_b64
         if pinned_public_key_b64 is not None
-        else PINNED_CORE_PUBLIC_KEY_B64
+        else _effective_pinned_key()
     )
     pub = _load_pinned_public_key(raw_b64)
     try:

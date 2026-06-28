@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from node_agent.classifier import StubClassifier
+from node_agent.classifier import KeywordClassifier, StubClassifier
 from node_agent.client import NodeAgentClient
 from node_agent.joblog import DEFAULT_JOBLOG_PATH, JobLog
 from node_agent.keys import DEFAULT_KEY_PATH, ensure_keypair
@@ -28,9 +28,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     keys = ensure_keypair(DEFAULT_KEY_PATH)
     joblog = JobLog(DEFAULT_JOBLOG_PATH)
+    classifier = KeywordClassifier() if not args.stub else StubClassifier()
     client = NodeAgentClient(
         edge_base_url=edge,
-        classifier=StubClassifier(),
+        classifier=classifier,
         keys=keys,
         joblog=joblog,
     )
@@ -70,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run", help="pull and process the next work unit")
     run_p.add_argument("--edge", help="edge base URL (or LUSTRO_NODE_EDGE_URL)")
+    run_p.add_argument(
+        "--stub", action="store_true",
+        help="use the stub classifier (for tests / smoke runs)"
+    )
     run_p.set_defaults(func=cmd_run)
 
     dump_p = sub.add_parser("dump-log", help="print the local job log")
