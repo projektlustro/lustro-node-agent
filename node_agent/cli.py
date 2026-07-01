@@ -37,13 +37,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     registered_path = STATE_DIR / "registered"
     if not registered_path.exists():
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
         try:
             client.register_agent()
+            registered_path.write_text(keys.public_key_raw_b64(), encoding="utf-8")
         except Exception as exc:
             print(f"error: registration failed: {exc}", file=sys.stderr)
             return 2
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        registered_path.write_text(keys.public_key_raw_b64(), encoding="utf-8")
     result = client.pull_and_process()
     if result is None:
         print("no work available")
