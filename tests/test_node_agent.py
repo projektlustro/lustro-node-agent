@@ -16,6 +16,7 @@ Invariants asserted here:
 import base64
 import json
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -224,6 +225,10 @@ class _FakeHttp:
             def json():
                 return wu
 
+            @staticmethod
+            def raise_for_status():
+                pass
+
         return _R()
 
     def post(self, url, json=None):
@@ -231,6 +236,10 @@ class _FakeHttp:
 
         class _R:
             status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                pass
 
         return _R()
 
@@ -448,3 +457,28 @@ def test_wu_not_marked_seen_when_post_fails(tmp_path, monkeypatch):
     out = client.process_wu(wu, http=ok)
     assert out["labels"] == ["bad"]
     assert len(ok.posts) == 1
+
+
+def test_non_2xx_result_leaves_wu_unseen(tmp_path, monkeypatch):
+    """A 5xx response from /result must raise and leave the WU eligible for retry."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier("bad", 0.9), keys,
+        JobLog(tmp_path / "j.jsonl"),
+    )
+    wu = _signed_wu(priv, {"wu_id": "wu-500", "kind": "text", "payload": {"text": "hi"}})
+
+    class _Http500:
+        def post(self, url, json=None):
+            req = httpx.Request("POST", url)
+            return httpx.Response(500, request=req)
+
+        def close(self):
+            pass
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.process_wu(wu, http=_Http500())
+
+    assert "wu-500" not in client._seen_wu_ids

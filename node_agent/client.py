@@ -168,17 +168,18 @@ class NodeAgentClient:
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:
-            client.post(url, json=body)
+            resp = client.post(url, json=body)
         finally:
             if owns_client:
                 client.close()
 
+        resp.raise_for_status()
         # Mark seen only AFTER a successful POST: a transient delivery failure
         # raises above and leaves the WU eligible for a later retry, rather than
         # being silently dropped as "already processed".
         self._mark_seen(wu)
         self._joblog.append(
-            {"event": "wu_processed", "wu_id": wu_id, "labels": body["labels"]}
+            {"event": "wu_processed", "wu_id": wu_id, "labels": body["labels"], "status": resp.status_code}
         )
         return body
 
