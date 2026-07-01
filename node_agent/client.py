@@ -183,6 +183,20 @@ class NodeAgentClient:
         )
         return body
 
+    def register_agent(self, http: httpx.Client | None = None) -> None:
+        """Register this node with the edge on first run."""
+        url = self._egress.check(f"{self._edge}/v1/wu/register-agent")
+        body = {"agent_pubkey": self._keys.public_key_raw_b64()}
+        owns_client = http is None
+        client = http or httpx.Client(timeout=30)
+        try:
+            resp = client.post(url, json=body)
+            resp.raise_for_status()
+        finally:
+            if owns_client:
+                client.close()
+        self._joblog.append({"event": "agent_registered", "agent_pubkey": body["agent_pubkey"]})
+
     def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
         """Pull one WU from the edge and process it; None if no work (204)."""
         url = self._egress.check(f"{self._edge}/v1/wu")

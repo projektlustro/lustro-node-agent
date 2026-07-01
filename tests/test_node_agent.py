@@ -482,3 +482,52 @@ def test_non_2xx_result_leaves_wu_unseen(tmp_path, monkeypatch):
         client.process_wu(wu, http=_Http500())
 
     assert "wu-500" not in client._seen_wu_ids
+
+
+# --- register_agent ---
+
+def test_register_agent_on_first_run(tmp_path):
+    keys = _agent_keys(tmp_path)
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    class _RegisterHttp:
+        def post(self, url, json=None):
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+            return _R()
+
+        def close(self):
+            pass
+
+    client.register_agent(http=_RegisterHttp())
+
+    events = [r["event"] for r in jl.read_all()]
+    assert "agent_registered" in events
+    registered_rows = [r for r in jl.read_all() if r["event"] == "agent_registered"]
+    assert registered_rows[0]["agent_pubkey"] == keys.public_key_raw_b64()
+
+
+def test_register_agent_non_2xx_raises(tmp_path):
+    keys = _agent_keys(tmp_path)
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    class _Register500Http:
+        def post(self, url, json=None):
+            req = httpx.Request("POST", url)
+            return httpx.Response(500, request=req)
+
+        def close(self):
+            pass
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.register_agent(http=_Register500Http())
+
+    events = [r["event"] for r in jl.read_all()]
+    assert "agent_registered" not in events
