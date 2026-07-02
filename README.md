@@ -1,5 +1,13 @@
 # node-agent
 
+Part of [projektlustro](https://github.com/projektlustro) — see the LUSTRO
+documentation site (access-gated pre-launch) for architecture and the trust
+model. This repository is the canonical node-agent; the monorepo vendors it as a
+submodule.
+
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+
 A **volunteer-run, sandboxed classifier** for LUSTRO. You run it on your own
 machine to help classify *public* work units. It is built to earn trust through
 hard, testable guarantees — not promises.
