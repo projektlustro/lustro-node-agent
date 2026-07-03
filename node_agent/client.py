@@ -173,12 +173,25 @@ class NodeAgentClient:
 
         Returns the posted `WorkUnitResult` body.
         """
+        # The WU is adversary-influenced edge JSON; a non-object (e.g. a bare
+        # list) or a missing signed field must reject cleanly, never crash with
+        # an AttributeError/KeyError.
+        if not isinstance(wu, dict):
+            raise CorePinError("work unit is not a JSON object")
+
         wu_id = wu.get("wu_id")
 
         # The contract makes wu_id required; reject a missing/empty one rather
         # than building a bogus '/v1/wu/None/result' URL or an unkeyed result.
         if not wu_id:
             raise CorePinError("work unit missing wu_id")
+
+        # Every field the canonical signed body covers must be present before we
+        # serialize it, or canonical_wu_bytes would KeyError. (kind/payload/
+        # core_pubkey_id join wu_id in the signed envelope.)
+        for field in ("kind", "payload", "core_pubkey_id"):
+            if field not in wu:
+                raise CorePinError(f"work unit missing {field}")
 
         # Anti-replay before doing any work.
         if self._seen(wu):
@@ -282,6 +295,8 @@ class NodeAgentClient:
                 except ValueError:
                     raise CorePinError("work unit response content-length invalid")
             wu = resp.json()
+            if not isinstance(wu, dict):
+                raise CorePinError("edge returned a non-object work unit")
             return self.process_wu(wu, http=client)
         finally:
             if owns_client:

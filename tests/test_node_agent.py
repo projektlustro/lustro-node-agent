@@ -610,6 +610,53 @@ def test_missing_wu_id_is_rejected(tmp_path, monkeypatch):
         client.process_wu(wu, http=_FakeHttp())
 
 
+def test_edge_returning_json_list_is_rejected_not_crash(tmp_path, monkeypatch):
+    """N-L1: a JSON list (not object) from the edge rejects cleanly."""
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
+    )
+    http = _FakeHttp(wu=[])  # edge returns a JSON array
+    with pytest.raises(CorePinError):
+        client.pull_and_process(http=http)
+
+
+def test_wu_missing_kind_is_rejected_not_crash(tmp_path, monkeypatch):
+    """N-L1: a WU missing a signed field (kind) rejects with CorePinError, not
+    a KeyError from canonical_wu_bytes."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
+    )
+    # Valid wu_id + core_sig present, but no `kind`: canonical_wu_bytes would
+    # KeyError without the up-front field check.
+    wu = {
+        "wu_id": "wu-1", "payload": {"text": "hi"},
+        "core_pubkey_id": "lustro-core-key-v1", "core_sig": "",
+    }
+    with pytest.raises(CorePinError):
+        client.process_wu(wu, http=_FakeHttp())
+
+
+def test_wu_not_a_dict_is_rejected_not_crash(tmp_path, monkeypatch):
+    """N-L1: process_wu on a non-dict raises CorePinError, not AttributeError."""
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
+    )
+    with pytest.raises(CorePinError):
+        client.process_wu(["not", "a", "dict"], http=_FakeHttp())
+
+
 def test_wu_not_marked_seen_when_post_fails(tmp_path, monkeypatch):
     """A transient POST failure must NOT consume the WU: a later retry succeeds."""
     priv, pem = _make_core()
