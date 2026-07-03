@@ -27,22 +27,50 @@ PINNED_CORE_KEY_ID = "lustro-core-key-v1"
 
 # Base64 of the pinned core public key's raw 32 bytes.
 #
-# Dev builds ship with a real keypair so the WU pipeline works end-to-end
-# out-of-the-box.  Production builds override this at release time via
-# `LUSTRO_NODE_AGENT_PINNED_KEY_B64` (preferred) or by patching this constant.
-# An empty value still triggers the fail-closed behaviour in
-# `verify_wu_signature`.
+# The baked-in dev key only becomes the default when `LUSTRO_NODE_AGENT_DEV=1`
+# is set explicitly. Production builds ship with NO baked-in key: the default is
+# empty, which fails CLOSED in `verify_wu_signature`, and the pinned key is
+# supplied at release time via `LUSTRO_NODE_AGENT_PINNED_KEY_B64` (preferred) or
+# by patching this constant. A build with neither the dev flag nor the env
+# override trusts nothing rather than silently trusting the dev key (fail-open).
 _DEV_CORE_PUBLIC_KEY_B64 = "3xr2nMlHr2Lj+WMO+vZ09gIgUeSDk7d2HxW4UZ3ymOg="
-PINNED_CORE_PUBLIC_KEY_B64: str = _DEV_CORE_PUBLIC_KEY_B64
+
+# Flag that opts a build into the baked-in dev key. Anything other than "1"
+# leaves the default empty (fail-closed).
+_DEV_FLAG = "LUSTRO_NODE_AGENT_DEV"
 
 # Env-var override so prod deployments (and tests) can swap the key without
 # editing source.
 _ENV_KEY = "LUSTRO_NODE_AGENT_PINNED_KEY_B64"
 
 
+def _default_pinned_key_b64(env: "os._Environ[str] | dict[str, str] | None" = None) -> str:
+    """Baked-in default: the dev key only when the dev flag is explicitly set."""
+    e = os.environ if env is None else env
+    return _DEV_CORE_PUBLIC_KEY_B64 if e.get(_DEV_FLAG) == "1" else ""
+
+
+PINNED_CORE_PUBLIC_KEY_B64: str = _default_pinned_key_b64()
+
+
 def _effective_pinned_key() -> str:
-    """Return the pinned key, preferring the env override over the baked-in dev key."""
-    return os.environ.get(_ENV_KEY, PINNED_CORE_PUBLIC_KEY_B64)
+    """Return the pinned key that this build trusts.
+
+    Preference order:
+      1. `LUSTRO_NODE_AGENT_PINNED_KEY_B64` env override (prod releases / tests);
+      2. the module constant `PINNED_CORE_PUBLIC_KEY_B64` when non-empty (a
+         prod-patched build, or a test that pins its own key);
+      3. the baked-in dev key ONLY when `LUSTRO_NODE_AGENT_DEV=1`, else empty.
+
+    With no override, no patched constant and no dev flag this returns "" and the
+    caller fails CLOSED — the default trust set is empty, never the dev key.
+    """
+    override = os.environ.get(_ENV_KEY)
+    if override is not None:
+        return override
+    if PINNED_CORE_PUBLIC_KEY_B64:
+        return PINNED_CORE_PUBLIC_KEY_B64
+    return _default_pinned_key_b64()
 
 
 class CorePinError(Exception):

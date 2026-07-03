@@ -162,6 +162,49 @@ def test_core_sig_fails_closed_with_no_pinned_key():
         )
 
 
+def test_default_fails_closed_without_dev_flag_or_env(monkeypatch):
+    """N-H1: with neither LUSTRO_NODE_AGENT_PINNED_KEY_B64 nor
+    LUSTRO_NODE_AGENT_DEV set, a build trusts NO core key and rejects even a
+    validly (dev-)signed WU — fail-closed, never fail-open on the dev key."""
+    monkeypatch.delenv("LUSTRO_NODE_AGENT_PINNED_KEY_B64", raising=False)
+    monkeypatch.delenv("LUSTRO_NODE_AGENT_DEV", raising=False)
+    # The module constant must default empty when the dev flag is unset.
+    monkeypatch.setattr(
+        core_pin, "PINNED_CORE_PUBLIC_KEY_B64", core_pin._default_pinned_key_b64()
+    )
+    assert core_pin._effective_pinned_key() == ""
+
+    priv, _ = _make_core()
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"},
+          "core_pubkey_id": "lustro-core-key-v1"}
+    sig = priv.sign(canonical_wu_bytes(wu))
+    with pytest.raises(CorePinError):
+        # No explicit pinned_public_key_b64 -> falls through to the (empty)
+        # effective key -> fail closed.
+        verify_wu_signature(canonical_wu_bytes(wu), sig, "lustro-core-key-v1")
+
+
+def test_dev_flag_activates_baked_in_dev_key(monkeypatch):
+    """N-H1: with LUSTRO_NODE_AGENT_DEV=1 (and no env override), the baked-in
+    dev key becomes the effective pinned key and verifies a dev-signed WU.
+
+    The dev *private* key is not in this public repo, so we pin a controlled
+    keypair onto the dev-key slot to exercise the gating branch faithfully."""
+    monkeypatch.delenv("LUSTRO_NODE_AGENT_PINNED_KEY_B64", raising=False)
+    monkeypatch.setenv("LUSTRO_NODE_AGENT_DEV", "1")
+    priv, raw_b64 = _make_core()
+    monkeypatch.setattr(core_pin, "_DEV_CORE_PUBLIC_KEY_B64", raw_b64)
+    monkeypatch.setattr(
+        core_pin, "PINNED_CORE_PUBLIC_KEY_B64", core_pin._default_pinned_key_b64()
+    )
+    assert core_pin._effective_pinned_key() == raw_b64
+
+    wu = {"wu_id": "1", "kind": "text", "payload": {"text": "x"},
+          "core_pubkey_id": "lustro-core-key-v1"}
+    sig = priv.sign(canonical_wu_bytes(wu))
+    verify_wu_signature(canonical_wu_bytes(wu), sig, "lustro-core-key-v1")
+
+
 # --- egress: refuses non-allowlisted host ---
 
 def test_egress_allows_allowlisted_host():
