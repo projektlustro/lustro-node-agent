@@ -6,6 +6,7 @@ volunteer owns.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ class JobLog:
     def __init__(self, path: Path | str = DEFAULT_JOBLOG_PATH) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._path.parent, 0o700)
 
     @property
     def path(self) -> Path:
@@ -23,8 +25,11 @@ class JobLog:
 
     def append(self, entry: dict) -> None:
         record = {"ts": time.time(), **entry}
+        existed = self._path.exists()
         with self._path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if not existed:
+            os.chmod(self._path, 0o600)
 
     def read_all(self) -> list[dict]:
         if not self._path.exists():

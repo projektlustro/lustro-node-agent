@@ -32,14 +32,22 @@ def ensure_keypair(path: Path | str = DEFAULT_KEY_PATH) -> "AgentKeys":
     p = Path(path)
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(p.parent, 0o700)
         priv = Ed25519PrivateKey.generate()
         pem = priv.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        # Write private key with restrictive permissions.
-        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Write the private key 0600. O_EXCL|O_NOFOLLOW makes this a hard
+        # first-write: it refuses to follow a pre-planted symlink and refuses to
+        # clobber an existing file at the path (a race/attack surface), which is
+        # the correct semantics since we only reach here when p does not exist.
+        fd = os.open(
+            str(p),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
         try:
             os.write(fd, pem)
         finally:

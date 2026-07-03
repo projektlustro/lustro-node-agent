@@ -109,6 +109,41 @@ def test_private_key_file_permissions(tmp_path):
     assert mode == 0o600
 
 
+def test_state_dir_0700_and_key_0600(tmp_path):
+    """N-L2: after ensure_keypair the state dir is 0700 and the key file 0600."""
+    state = tmp_path / ".lustro-node-agent"
+    key_path = state / "agent_ed25519.key"
+    ensure_keypair(key_path)
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert key_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_key_write_refuses_preexisting_symlink(tmp_path):
+    """N-L2: O_NOFOLLOW|O_EXCL refuses to write the key through a pre-planted
+    (dangling) symlink at the key path — a symlink-attack guard."""
+    import os as _os
+
+    state = tmp_path / ".lustro-node-agent"
+    state.mkdir()
+    key_path = state / "agent_ed25519.key"
+    # Dangling symlink: exists() is False so ensure_keypair reaches os.open,
+    # where O_NOFOLLOW must refuse to follow the link.
+    _os.symlink(tmp_path / "elsewhere.key", key_path)
+    with pytest.raises(OSError):
+        ensure_keypair(key_path)
+    # Nothing was written through the link.
+    assert not (tmp_path / "elsewhere.key").exists()
+
+
+def test_joblog_file_permissions(tmp_path):
+    """N-L2: the joblog file is created 0600 and its dir 0700."""
+    state = tmp_path / ".lustro-node-agent"
+    jl = JobLog(state / "joblog.jsonl")
+    jl.append({"event": "x"})
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert jl.path.stat().st_mode & 0o777 == 0o600
+
+
 # --- core_pin: rejects wrong pinned key / bad sig ---
 
 def _make_core():
