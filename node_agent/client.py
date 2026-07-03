@@ -21,6 +21,8 @@ Every step is recorded to the JobLog. All network calls go through the
 import base64
 import binascii
 import json
+import os
+from pathlib import Path
 
 import httpx
 
@@ -29,6 +31,9 @@ from node_agent.core_pin import CorePinError, verify_wu_signature
 from node_agent.egress import EgressGuard
 from node_agent.joblog import JobLog
 from node_agent.keys import AgentKeys
+
+DEFAULT_SEEN_PATH = Path.home() / ".lustro-node-agent" / "seen.jsonl"
+
 
 class ReplayError(Exception):
     """Raised when a work unit wu_id / nonce has already been processed."""
@@ -64,14 +69,63 @@ class NodeAgentClient:
         classifier: Classifier,
         keys: AgentKeys,
         joblog: JobLog,
+        seen_path: Path | None = None,
     ) -> None:
         self._egress = EgressGuard(edge_base_url)
         self._edge = self._egress.allowed_base_url
         self._classifier = classifier
         self._keys = keys
         self._joblog = joblog
+        self._seen_path = Path(seen_path) if seen_path is not None else DEFAULT_SEEN_PATH
         self._seen_wu_ids: set[str] = set()
         self._seen_nonces: set[str] = set()
+        self._load_seen()
+
+    def _load_seen(self) -> None:
+        """Load previously-seen wu_ids/nonces so anti-replay survives restarts.
+
+        Without this the seen set lives only in memory, so an agent that runs one
+        WU per process (the `node-agent run` cron model) can replay every WU it
+        has ever processed. A malformed line is skipped, not fatal.
+        """
+        if not self._seen_path.exists():
+            return
+        for line in self._seen_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            wu_id = rec.get("wu_id")
+            nonce = rec.get("nonce")
+            if wu_id is not None:
+                self._seen_wu_ids.add(wu_id)
+            if nonce is not None:
+                self._seen_nonces.add(nonce)
+
+    def _persist_seen(self, wu: dict) -> None:
+        """Append the just-processed wu_id/nonce to the on-disk seen log (0600)."""
+        wu_id = wu.get("wu_id")
+        nonce = wu.get("nonce")
+        if wu_id is None and nonce is None:
+            return
+        parent = self._seen_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(parent, 0o700)
+        rec = {}
+        if wu_id is not None:
+            rec["wu_id"] = wu_id
+        if nonce is not None:
+            rec["nonce"] = nonce
+        existed = self._seen_path.exists()
+        with self._seen_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if not existed:
+            os.chmod(self._seen_path, 0o600)
 
     def _seen(self, wu: dict) -> bool:
         wu_id = wu.get("wu_id")
@@ -85,6 +139,7 @@ class NodeAgentClient:
             self._seen_wu_ids.add(wu["wu_id"])
         if wu.get("nonce") is not None:
             self._seen_nonces.add(wu["nonce"])
+        self._persist_seen(wu)
 
     @staticmethod
     def _payload_text(payload: object) -> str:

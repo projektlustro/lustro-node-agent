@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from node_agent.classifier import KeywordClassifier, StubClassifier
-from node_agent.client import NodeAgentClient
+from node_agent.client import DEFAULT_SEEN_PATH, NodeAgentClient
 from node_agent.joblog import DEFAULT_JOBLOG_PATH, JobLog
 from node_agent.keys import DEFAULT_KEY_PATH, ensure_keypair
 
@@ -34,6 +34,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         classifier=classifier,
         keys=keys,
         joblog=joblog,
+        seen_path=DEFAULT_SEEN_PATH,
     )
     registered_path = STATE_DIR / "registered"
     if not registered_path.exists():

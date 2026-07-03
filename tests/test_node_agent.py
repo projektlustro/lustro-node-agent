@@ -393,6 +393,77 @@ def test_anti_replay_rejects_repeated_nonce(tmp_path, monkeypatch):
         client.process_wu(wu2, http=http)
 
 
+def test_anti_replay_persists_across_restart(tmp_path, monkeypatch):
+    """N-M1: a wu_id processed by one client is rejected by a FRESH client on
+    the same seen_path — the cross-restart replay the in-memory set misses."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    seen_path = tmp_path / "seen.jsonl"
+    wu = _signed_wu(priv, {"wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}})
+
+    client_a = NodeAgentClient(
+        "https://edge.example.com", StubClassifier("bad", 0.9), keys,
+        JobLog(tmp_path / "a.jsonl"), seen_path=seen_path,
+    )
+    out = client_a.process_wu(wu, http=_FakeHttp())
+    assert out["labels"] == ["bad"]
+    assert seen_path.exists()
+
+    # A brand-new client (process restart) with no in-memory state, same store.
+    client_b = NodeAgentClient(
+        "https://edge.example.com", StubClassifier("bad", 0.9), keys,
+        JobLog(tmp_path / "b.jsonl"), seen_path=seen_path,
+    )
+    with pytest.raises(ReplayError):
+        client_b.process_wu(wu, http=_FakeHttp())
+
+
+def test_anti_replay_persists_nonce_across_restart(tmp_path, monkeypatch):
+    """N-M1: an explicit nonce is also persisted and blocks a restart replay."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    seen_path = tmp_path / "seen.jsonl"
+    wu1 = _signed_wu(priv, {
+        "wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}, "nonce": "n1",
+    })
+    wu2 = _signed_wu(priv, {
+        "wu_id": "wu-2", "kind": "text", "payload": {"text": "hi"}, "nonce": "n1",
+    })
+    client_a = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "a.jsonl"), seen_path=seen_path,
+    )
+    client_a.process_wu(wu1, http=_FakeHttp())
+
+    client_b = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "b.jsonl"), seen_path=seen_path,
+    )
+    with pytest.raises(ReplayError):
+        client_b.process_wu(wu2, http=_FakeHttp())
+
+
+def test_seen_store_permissions(tmp_path, monkeypatch):
+    """N-M1: the seen store dir is 0700 and the file 0600."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    seen_dir = tmp_path / "state"
+    seen_path = seen_dir / "seen.jsonl"
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier("bad", 0.9), keys,
+        JobLog(tmp_path / "a.jsonl"), seen_path=seen_path,
+    )
+    client.process_wu(
+        _signed_wu(priv, {"wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}}),
+        http=_FakeHttp(),
+    )
+    assert seen_dir.stat().st_mode & 0o777 == 0o700
+    assert seen_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_client_rejects_unsigned_wu(tmp_path, monkeypatch):
     _, pem = _make_core()
     monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
