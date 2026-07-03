@@ -34,6 +34,15 @@ from node_agent.keys import AgentKeys
 
 DEFAULT_SEEN_PATH = Path.home() / ".lustro-node-agent" / "seen.jsonl"
 
+# The WU payload text is adversary-controlled (it originates from scraped
+# content). Cap the length we ever hand to the classifier so a giant `text`
+# field can't drive the volunteer's CPU/RAM to exhaustion.
+MAX_WU_TEXT_LEN = 64 * 1024
+
+# Refuse an edge response whose declared body size exceeds this before parsing
+# JSON — a crude first guard against a multi-hundred-MB response OOMing us.
+MAX_WU_RESPONSE_BYTES = 1024 * 1024
+
 
 class ReplayError(Exception):
     """Raised when a work unit wu_id / nonce has already been processed."""
@@ -148,9 +157,9 @@ class NodeAgentClient:
         Payload is `unknown` in the contract; the text kind carries `{text: ...}`.
         """
         if isinstance(payload, dict):
-            return str(payload.get("text", ""))
+            return str(payload.get("text", ""))[:MAX_WU_TEXT_LEN]
         if isinstance(payload, str):
-            return payload
+            return payload[:MAX_WU_TEXT_LEN]
         return ""
 
     @staticmethod
@@ -262,6 +271,16 @@ class NodeAgentClient:
             if resp.status_code == 204:
                 self._joblog.append({"event": "no_work"})
                 return None
+            # Refuse an over-large response before parsing it, so a hostile edge
+            # can't OOM the volunteer by streaming a huge body into json().
+            headers = getattr(resp, "headers", {}) or {}
+            declared = headers.get("content-length")
+            if declared is not None:
+                try:
+                    if int(declared) > MAX_WU_RESPONSE_BYTES:
+                        raise CorePinError("work unit response too large")
+                except ValueError:
+                    raise CorePinError("work unit response content-length invalid")
             wu = resp.json()
             return self.process_wu(wu, http=client)
         finally:

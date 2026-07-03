@@ -487,6 +487,76 @@ def test_client_rejects_unsigned_wu(tmp_path, monkeypatch):
         client.process_wu(wu, http=_FakeHttp())
 
 
+def test_oversized_wu_text_is_truncated_before_classify(tmp_path, monkeypatch):
+    """N-M2: a 1 MB `text` field is capped at MAX_WU_TEXT_LEN before it ever
+    reaches the classifier, and process_wu still completes."""
+    from node_agent.client import MAX_WU_TEXT_LEN
+
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+
+    seen_text = {}
+
+    class _CapturingClassifier:
+        def classify(self, text, lang=None):
+            seen_text["len"] = len(text)
+            return StubClassifier("bad", 0.9).classify(text, lang)
+
+    client = NodeAgentClient(
+        "https://edge.example.com", _CapturingClassifier(), keys,
+        JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
+    )
+    big = "x" * (1024 * 1024)
+    wu = _signed_wu(priv, {"wu_id": "wu-big", "kind": "text", "payload": {"text": big}})
+
+    out = client.process_wu(wu, http=_FakeHttp())
+
+    assert out["labels"] == ["bad"]
+    assert seen_text["len"] == MAX_WU_TEXT_LEN
+    assert seen_text["len"] < len(big)
+
+
+def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
+    """N-M2: an edge response declaring a body over the cap is refused before
+    json() is called, so a hostile edge can't OOM the volunteer."""
+    from node_agent.client import MAX_WU_RESPONSE_BYTES
+
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
+    )
+
+    class _HugeHttp:
+        def __init__(self):
+            self.parsed = False
+
+        def get(self, url):
+            parent = self
+
+            class _R:
+                status_code = 200
+                headers = {"content-length": str(MAX_WU_RESPONSE_BYTES + 1)}
+
+                @staticmethod
+                def json():
+                    parent.parsed = True
+                    return {}
+
+            return _R()
+
+        def close(self):
+            pass
+
+    http = _HugeHttp()
+    with pytest.raises(CorePinError):
+        client.pull_and_process(http=http)
+    assert http.parsed is False
+
+
 def test_client_egress_bound_to_edge(tmp_path):
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
