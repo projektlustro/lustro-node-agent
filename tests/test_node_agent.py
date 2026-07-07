@@ -286,28 +286,35 @@ def _signed_wu(priv, wu):
     return {**wu, "core_sig": base64.b64encode(sig).decode()}
 
 
+class _StreamCtx:
+    """Minimal stand-in for the httpx.Client.stream() context manager."""
+
+    def __init__(self, status_code, body_bytes):
+        self.status_code = status_code
+        self._body = body_bytes
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_bytes(self):
+        yield self._body
+
+
 class _FakeHttp:
     def __init__(self, wu=None):
         self.posts = []
         self.gets = []
         self._wu = wu
 
-    def get(self, url):
+    def stream(self, method, url):
         self.gets.append(url)
         wu = self._wu
-
-        class _R:
-            status_code = 200 if wu is not None else 204
-
-            @staticmethod
-            def json():
-                return wu
-
-            @staticmethod
-            def raise_for_status():
-                pass
-
-        return _R()
+        if wu is None:
+            return _StreamCtx(204, b"")
+        return _StreamCtx(200, json.dumps(wu).encode())
 
     def post(self, url, json=None):
         self.posts.append((url, json))
@@ -553,8 +560,10 @@ def test_oversized_wu_text_is_truncated_before_classify(tmp_path, monkeypatch):
 
 
 def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
-    """N-M2: an edge response declaring a body over the cap is refused before
-    json() is called, so a hostile edge can't OOM the volunteer."""
+    """N-M2: an edge response whose actual streamed body exceeds the cap is
+    refused before json.loads() is called, so a hostile edge can't OOM the
+    volunteer — regardless of whether it declares an (untrustworthy, and
+    here deliberately absent) Content-Length header."""
     from node_agent.client import MAX_WU_RESPONSE_BYTES
 
     _, pem = _make_core()
@@ -565,23 +574,28 @@ def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
         JobLog(tmp_path / "j.jsonl"), seen_path=tmp_path / "seen.jsonl",
     )
 
+    class _HugeStreamCtx:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def iter_bytes(self):
+            # Stream real bytes over the cap, in chunks, with NO
+            # Content-Length declared anywhere — this is exactly the
+            # chunked-transfer bypass that a naive header-only check misses.
+            chunk = b"a" * 65536
+            sent = 0
+            while sent <= MAX_WU_RESPONSE_BYTES:
+                sent += len(chunk)
+                yield chunk
+
     class _HugeHttp:
-        def __init__(self):
-            self.parsed = False
-
-        def get(self, url):
-            parent = self
-
-            class _R:
-                status_code = 200
-                headers = {"content-length": str(MAX_WU_RESPONSE_BYTES + 1)}
-
-                @staticmethod
-                def json():
-                    parent.parsed = True
-                    return {}
-
-            return _R()
+        def stream(self, method, url):
+            return _HugeStreamCtx()
 
         def close(self):
             pass
@@ -589,7 +603,6 @@ def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
     http = _HugeHttp()
     with pytest.raises(CorePinError):
         client.pull_and_process(http=http)
-    assert http.parsed is False
 
 
 def test_client_egress_bound_to_edge(tmp_path):

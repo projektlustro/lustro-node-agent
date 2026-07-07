@@ -280,21 +280,25 @@ class NodeAgentClient:
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:
-            resp = client.get(url)
-            if resp.status_code == 204:
-                self._joblog.append({"event": "no_work"})
-                return None
-            # Refuse an over-large response before parsing it, so a hostile edge
-            # can't OOM the volunteer by streaming a huge body into json().
-            headers = getattr(resp, "headers", {}) or {}
-            declared = headers.get("content-length")
-            if declared is not None:
-                try:
-                    if int(declared) > MAX_WU_RESPONSE_BYTES:
+            # Stream the response and enforce MAX_WU_RESPONSE_BYTES against the
+            # bytes actually received, not the (untrustworthy, optional)
+            # declared Content-Length header. A hostile edge can send a
+            # Transfer-Encoding: chunked body with no Content-Length at all,
+            # which would otherwise skip the size check entirely and let
+            # resp.json() buffer an unbounded body into memory.
+            with client.stream("GET", url) as resp:
+                if resp.status_code == 204:
+                    self._joblog.append({"event": "no_work"})
+                    return None
+                body = bytearray()
+                for chunk in resp.iter_bytes():
+                    body += chunk
+                    if len(body) > MAX_WU_RESPONSE_BYTES:
                         raise CorePinError("work unit response too large")
-                except ValueError:
-                    raise CorePinError("work unit response content-length invalid")
-            wu = resp.json()
+            try:
+                wu = json.loads(bytes(body))
+            except json.JSONDecodeError as e:
+                raise CorePinError("edge response is not valid JSON") from e
             if not isinstance(wu, dict):
                 raise CorePinError("edge returned a non-object work unit")
             return self.process_wu(wu, http=client)
