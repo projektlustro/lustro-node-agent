@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -22,3 +23,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t node-agent .
+
+  docker-publish:
+    needs: [test, docker-build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # projektlustro is already lowercase; if this repo is ever transferred to
+      # a mixed-case org, github.repository_owner must be lowercased before
+      # use here since GHCR image paths reject uppercase.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/node-agent
+          tags: |
+            type=sha
+            type=ref,event=tag
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+      - uses: sigstore/cosign-installer@v3
+      - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/node-agent@${{ steps.build.outputs.digest }}

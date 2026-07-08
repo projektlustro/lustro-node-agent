@@ -144,7 +144,9 @@ installed in the `-dev` stage and copied into the minimal runtime stage.
 - Requires: nothing
 - Blocks: Phase 2 (CI needs the new Dockerfile to build/push, and the existing PR-time `docker-build` job needs a `dhi.io` login added or it will start failing on every PR — see Phase 2)
 
-## Phase 2: CI — publish + cosign-sign the image (closes existing README gap)
+## Phase 2: CI — publish + cosign-sign the image (closes existing README gap) ✅ Complete
+
+**Actual result**: real org confirmed via `git remote -v` (`github.com/projektlustro/lustro-node-agent`, already lowercase) — `${{ github.repository_owner }}` resolves to `projektlustro` with no runtime lowercasing needed; left a one-line comment flagging the caveat for future org transfers. Did **not** add a `dhi.io` login to the existing `docker-build` job — Phase 1 confirmed anonymous DHI pulls work, so the plan's original "part A" concern didn't materialize; if CI later hits rate-limiting, that's a 4-line fix, not pre-emptive hardening (YAGNI). `on.push.tags` extended to `["v*"]`. YAML syntax validated and `pytest -q` still green (unaffected, YAML-only change). **Not verified**: the actual publish+cosign-sign flow requires a real push/tag event against GitHub Actions — untested by this change alone.
 
 `README.md` already instructs volunteers to `cosign verify` a
 `ghcr.io/lustro/node-agent:<tag>` image, but `.github/workflows/ci.yml`'s
