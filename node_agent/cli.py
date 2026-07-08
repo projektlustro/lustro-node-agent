@@ -7,6 +7,7 @@ Commands:
 """
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -68,7 +69,17 @@ def cmd_dump_log(args: argparse.Namespace) -> int:
 def cmd_leave(args: argparse.Namespace) -> int:
     """One-command exit: delete all local state the agent created."""
     if STATE_DIR.exists():
-        shutil.rmtree(STATE_DIR)
+        try:
+            shutil.rmtree(STATE_DIR)
+        except OSError as exc:
+            # STATE_DIR is commonly a Docker bind-mount point (the documented
+            # `-v host:/agent/.lustro-node-agent` usage). rmtree deletes every
+            # file/subdirectory fine but the mount point itself can't be
+            # rmdir'd from inside the container (EBUSY) -- that's not
+            # "residue" left behind, just an empty directory the host still
+            # owns, so treat it as the successful case rather than crashing.
+            if exc.errno != errno.EBUSY:
+                raise
         print(f"deleted local state: {STATE_DIR}")
     else:
         print("no local state to delete")

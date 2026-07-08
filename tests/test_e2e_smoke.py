@@ -145,6 +145,48 @@ def test_cli_dump_log_and_leave(tmp_path, monkeypatch, capsys):
     assert not joblog_path.exists()
 
 
+def test_cli_leave_tolerates_busy_mountpoint(tmp_path, monkeypatch, capsys):
+    """`leave` must not crash when STATE_DIR is a Docker bind-mount point.
+
+    rmtree can delete every file/subdir but can't rmdir the mount point
+    itself from inside the container (EBUSY) -- that's not "residue" left
+    behind, just an empty host-owned directory, so `leave` must still report
+    success rather than surfacing an uncaught OSError.
+    """
+    import errno
+    import shutil
+
+    state = tmp_path / ".lustro-node-agent"
+    state.mkdir()
+    monkeypatch.setattr(cli, "STATE_DIR", state)
+
+    def _rmtree_raises_ebusy(path):
+        raise OSError(errno.EBUSY, "Device or resource busy", str(path))
+
+    monkeypatch.setattr(shutil, "rmtree", _rmtree_raises_ebusy)
+
+    assert cli.main(["leave"]) == 0
+    out = capsys.readouterr().out
+    assert "deleted local state" in out
+
+
+def test_cli_leave_reraises_other_os_errors(tmp_path, monkeypatch):
+    """A non-EBUSY OSError during `leave` must still propagate, not be swallowed."""
+    import shutil
+
+    state = tmp_path / ".lustro-node-agent"
+    state.mkdir()
+    monkeypatch.setattr(cli, "STATE_DIR", state)
+
+    def _rmtree_raises_eacces(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(shutil, "rmtree", _rmtree_raises_eacces)
+
+    with pytest.raises(PermissionError):
+        cli.main(["leave"])
+
+
 def test_cli_run_requires_edge(monkeypatch, capsys):
     monkeypatch.delenv("LUSTRO_NODE_EDGE_URL", raising=False)
     assert cli.main(["run"]) == 2
