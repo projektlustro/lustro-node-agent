@@ -78,15 +78,17 @@ cosign verify \
   ghcr.io/projektlustro/node-agent:latest
 
 # 2. Process one work unit, with the edge URL from projektlustro.eu and
-#    persistent local state (your key + job log survive between runs)
+#    persistent local state (your key + job log survive between runs).
+#    --pull=always guards against running a stale cached :latest if you
+#    (or a fix) pulled this image before.
 mkdir -p ~/.lustro-node-agent
-docker run --rm \
+docker run --rm --pull=always \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://edge.lustro.example \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)
-docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   ghcr.io/projektlustro/node-agent:latest dump-log
 ```
 
@@ -97,7 +99,7 @@ systemd timer) for continuous participation.
 `leave` deletes ALL local state (keys + job log) in one command:
 
 ```bash
-docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   ghcr.io/projektlustro/node-agent:latest leave
 ```
 
