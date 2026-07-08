@@ -73,7 +73,7 @@ Run the published, signed container image — 3 steps.
 cosign verify \
   --certificate-identity-regexp 'https://github.com/projektlustro/lustro-node-agent/\.github/workflows/ci\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/projektlustro/node-agent:v0.1.0  # example tag — replace with a real published release
+  ghcr.io/projektlustro/node-agent:latest
 
 # 2. Process one work unit, with the edge URL from projektlustro.eu and
 #    persistent local state (your key + job log survive between runs)
@@ -81,11 +81,11 @@ mkdir -p ~/.lustro-node-agent
 docker run --rm \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://edge.lustro.example \
-  ghcr.io/projektlustro/node-agent:v0.1.0
+  ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)
 docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
-  ghcr.io/projektlustro/node-agent:v0.1.0 dump-log
+  ghcr.io/projektlustro/node-agent:latest dump-log
 ```
 
 `node-agent run` is **one-shot**: it pulls and processes a single work unit,
@@ -96,7 +96,7 @@ systemd timer) for continuous participation.
 
 ```bash
 docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
-  ghcr.io/projektlustro/node-agent:v0.1.0 leave
+  ghcr.io/projektlustro/node-agent:latest leave
 ```
 
 **Bind-mount ownership note**: the container's non-root user has a fixed
