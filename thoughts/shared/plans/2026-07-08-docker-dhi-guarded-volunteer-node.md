@@ -257,7 +257,9 @@ login at all).
 - Requires: Phase 1 (new Dockerfile)
 - Blocks: Phase 3 (3-step instructions reference the published image)
 
-## Phase 3: README — 3-step run instructions + honest guard framing
+## Phase 3: README — 3-step run instructions + honest guard framing ✅ Complete
+
+**Actual result**: used real values throughout — `ghcr.io/projektlustro/node-agent`, cosign identity scoped to this repo's own release workflow (`.github/workflows/ci.yml@refs/tags/v.*`), `v0.1.0` as an explicitly-labeled example tag (not a claim it exists). Merged the old standalone "Verify the release" section into step 1 rather than keeping two cosign snippets. Kept the source-checkout "Test" section for contributors without Docker. `pytest -q` unaffected (46 passed).
 
 ### Changes
 
