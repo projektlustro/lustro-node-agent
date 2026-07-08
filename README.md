@@ -38,23 +38,6 @@ test, not just asserted here.
 - **One-command leave.** `node-agent leave` deletes ALL local state — keys and
   job log — in a single command. No lock-in, no residue.
 
-## Verify the release before running
-
-Releases are signed with [cosign](https://github.com/sigstore/cosign)
-(keyless / Sigstore). Verify the container image signature **before** you run
-it, and only run images whose signature verifies against the pinned identity:
-
-```bash
-cosign verify \
-  --certificate-identity-regexp 'https://github.com/lustro/.*' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/lustro/node-agent:<tag>
-```
-
-Replace the identity/issuer with the exact pinned values published in the
-release notes. A reproducible build + published SBOM let you confirm the image
-matches this source.
-
 ## How the loop works (FROZEN wu contract)
 
 ```
@@ -71,30 +54,76 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
 5. **Sign** the result `{wu_id, labels, score}` with your local Ed25519 key.
 6. **POST** the signed `WorkUnitResult` back to the edge.
 
+## Getting authorized
+
+This repo is public — anyone can read the code and verify the guarantees
+above. Running it against a **real** edge, however, means joining the
+volunteer program: sign up at [projektlustro.eu](https://projektlustro.eu) to
+be pointed at the current edge URL. Wire-level agent authorization beyond
+that (mTLS or a signed JWT) is on the LUSTRO roadmap, not yet built —
+registration on the wire is intentionally open today. See "Why this is NOT a
+botnet" above for what's actually enforced right now.
+
 ## Usage
 
+Run the published, signed container image — 3 steps.
+
 ```bash
-# Run once (pull + process the next work unit):
-python -m node_agent.cli run --edge https://edge.lustro.example
+# 1. Verify the release image before running it
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/projektlustro/lustro-node-agent/\.github/workflows/ci\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/projektlustro/node-agent:v0.1.0  # example tag — replace with a real published release
 
-# Inspect every job you've processed (radical inspectability):
-python -m node_agent.cli dump-log
+# 2. Process one work unit, with the edge URL from projektlustro.eu and
+#    persistent local state (your key + job log survive between runs)
+mkdir -p ~/.lustro-node-agent
+docker run --rm \
+  -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+  -e LUSTRO_NODE_EDGE_URL=https://edge.lustro.example \
+  ghcr.io/projektlustro/node-agent:v0.1.0
 
-# One-command exit — deletes ALL local state (keys + job log):
-python -m node_agent.cli leave
+# 3. Inspect every job you've processed (radical inspectability)
+docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+  ghcr.io/projektlustro/node-agent:v0.1.0 dump-log
 ```
 
-The edge URL may also be supplied via `LUSTRO_NODE_EDGE_URL`.
+`node-agent run` is **one-shot**: it pulls and processes a single work unit,
+then exits. It is not a long-running loop. Schedule step 2 on cron (or a
+systemd timer) for continuous participation.
+
+`leave` deletes ALL local state (keys + job log) in one command:
+
+```bash
+docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+  ghcr.io/projektlustro/node-agent:v0.1.0 leave
+```
+
+**Bind-mount ownership note**: the container's non-root user has a fixed
+UID that may not match the host user who created `~/.lustro-node-agent`
+(e.g. via `mkdir -p` above). If the first run fails with a permissions error
+writing the key or job log, either run with
+`docker run --user "$(id -u):$(id -g)" ...` or `chown` the host directory to
+match the container's UID.
+
+The edge URL may also be supplied via `-e LUSTRO_NODE_EDGE_URL=...` as shown,
+or via `--edge` if running from source (see "Test" below).
 
 ## Test
+
+Running from source — for contributors, or if you'd rather not use Docker:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pytest -q
+
+python -m node_agent.cli run --edge https://edge.lustro.example
+python -m node_agent.cli dump-log
+python -m node_agent.cli leave
 ```
 
-The suite covers the trust invariants directly: the private key is never
+The test suite covers the trust invariants directly: the private key is never
 returned/transmitted, the core cannot mint the agent key, pinned-key
 verification (good/bad sig + key-id), anti-replay, egress refusal of off-host
 requests, and the end-to-end loop against a mock edge.
