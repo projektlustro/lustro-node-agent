@@ -69,9 +69,11 @@ botnet" above for what's actually enforced right now.
 Run the published, signed container image — 3 steps.
 
 ```bash
-# 1. Verify the release image before running it
+# 1. Verify the release image before running it (install cosign first if you
+#    don't have it: https://docs.sigstore.dev/cosign/system_config/installation/,
+#    e.g. `brew install cosign` on macOS)
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/projektlustro/lustro-node-agent/\.github/workflows/ci\.yml@refs/tags/v.*' \
+  --certificate-identity-regexp 'https://github.com/projektlustro/lustro-node-agent/\.github/workflows/ci\.yml@refs/(heads/main|tags/v.*)' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   ghcr.io/projektlustro/node-agent:latest
 
@@ -108,6 +110,10 @@ match the container's UID.
 
 The edge URL may also be supplied via `-e LUSTRO_NODE_EDGE_URL=...` as shown,
 or via `--edge` if running from source (see "Test" below).
+
+**Apple Silicon note**: only a `linux/amd64` image is published today. On an
+arm64 Mac, Docker runs it under emulation — it works, just slower to pull and
+start than a native image would be.
 
 ## Test
 
