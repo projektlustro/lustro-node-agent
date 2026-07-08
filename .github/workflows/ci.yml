@@ -22,6 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # dhi.io rate-limits anonymous pulls per-IP; GitHub-hosted runners share
+      # a small IP pool that other repos' anonymous DHI pulls already
+      # saturate (confirmed: 429 Too Many Requests on an unauthenticated
+      # build). Authenticated pulls get a much higher/no quota.
+      - uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
       - run: docker build -t node-agent .
 
   docker-publish:
@@ -34,6 +43,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

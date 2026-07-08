@@ -146,7 +146,13 @@ installed in the `-dev` stage and copied into the minimal runtime stage.
 
 ## Phase 2: CI — publish + cosign-sign the image (closes existing README gap) ✅ Complete
 
-**Actual result**: real org confirmed via `git remote -v` (`github.com/projektlustro/lustro-node-agent`, already lowercase) — `${{ github.repository_owner }}` resolves to `projektlustro` with no runtime lowercasing needed; left a one-line comment flagging the caveat for future org transfers. Did **not** add a `dhi.io` login to the existing `docker-build` job — Phase 1 confirmed anonymous DHI pulls work, so the plan's original "part A" concern didn't materialize; if CI later hits rate-limiting, that's a 4-line fix, not pre-emptive hardening (YAGNI). `on.push.tags` extended to `["v*"]`. YAML syntax validated and `pytest -q` still green (unaffected, YAML-only change). **Not verified**: the actual publish+cosign-sign flow requires a real push/tag event against GitHub Actions — untested by this change alone.
+**Actual result**: real org confirmed via `git remote -v` (`github.com/projektlustro/lustro-node-agent`, already lowercase) — `${{ github.repository_owner }}` resolves to `projektlustro` with no runtime lowercasing needed; left a one-line comment flagging the caveat for future org transfers. `on.push.tags` extended to `["v*"]`.
+
+**Correction after real CI evidence**: initially shipped WITHOUT a `dhi.io` login on `docker-build` (Phase 1 had confirmed anonymous DHI pulls work locally, and the YAGNI call was made not to pre-empt a hypothetical rate-limit). On PR #4's second CI run, `docker-build` failed for real:
+```
+failed to fetch oauth token: ... https://dhi.io/token?...: 429 Too Many Requests
+```
+GitHub-hosted runners share a small IP pool that other repos' anonymous DHI pulls already saturate — this is not flaky/transient, it's structural. Added `docker login dhi.io` (via `DHI_USERNAME`/`DHI_TOKEN` secrets) to **both** `docker-build` and `docker-publish` (the latter also builds and would have hit the identical 429 on its first real run, since it only logged into `ghcr.io`, never `dhi.io`). **Requires a human to add `DHI_USERNAME`/`DHI_TOKEN` as repo secrets** (a Docker Hub account + PAT) — cannot be done from a PR. Until those secrets exist, `docker-build`/`docker-publish` will fail cleanly on auth rather than intermittently on rate-limiting.
 
 `README.md` already instructs volunteers to `cosign verify` a
 `ghcr.io/lustro/node-agent:<tag>` image, but `.github/workflows/ci.yml`'s
