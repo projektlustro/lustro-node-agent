@@ -41,10 +41,15 @@ test, not just asserted here.
 ## How the loop works (FROZEN wu contract)
 
 ```
+POST /v1/wu/register-agent  -> registers your agent_pubkey (first run only)
 GET  /v1/wu                 -> WorkUnit  {wu_id, kind, payload, core_pubkey_id, core_sig}
 POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agent_sig}
 ```
 
+0. **Register** (first run only): POST your local public key to
+   `/v1/wu/register-agent`. If this fails (e.g. the edge is unreachable or
+   returns a server error), `run` exits with a clear error naming this URL —
+   that's what you're seeing if this is the first thing that fails.
 1. **Pull** the next work unit from the edge.
 2. **Verify** `core_sig` against the pinned core public key (reject on key-id
    mismatch or bad signature).
