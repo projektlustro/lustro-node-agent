@@ -108,7 +108,11 @@ def cmd_serve_log(args: argparse.Namespace) -> int:
             f"warning: binding to {host}; dashboard reachable beyond this machine",
             file=sys.stderr,
         )
-    server = LogWallServer(DEFAULT_JOBLOG_PATH, host=host, port=port)
+    try:
+        server = LogWallServer(DEFAULT_JOBLOG_PATH, host=host, port=port)
+    except (OSError, OverflowError) as exc:
+        print(f"error: cannot bind {host}:{port}: {exc}", file=sys.stderr)
+        return 2
     try:
         server.start(open_browser=not args.no_open)
     except KeyboardInterrupt:

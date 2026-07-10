@@ -494,9 +494,23 @@ found 3 further issues — all fixed and covered by new tests (60 passed total):
   regression test, so a future refactor could silently reintroduce the crash.
   New test: `test_logwall_api_survives_corrupt_line`.
 
-Also fixed: `--host ::1` was advertised as accepted (CLI + README) but crashed
-with `socket.gaierror` at startup (`ThreadingHTTPServer` is IPv4-only) —
-dropped from both the CLI's non-localhost-warning allowlist and the README.
+**Correction (caught by `/verify` on 2026-07-10, not actually fixed here):**
+this section originally claimed `--host ::1` was fixed by dropping it from
+the CLI's non-localhost-warning allowlist and the README. That edit was
+made, but it did not address the underlying crash — `LogWallServer` still
+raised an uncaught `OSError`/`socket.gaierror` for any IPv6 literal, since
+`ThreadingHTTPServer` binds IPv4 only. Live verification on a real running
+process reproduced the traceback after this plan's own "fixed" claim was
+written. See
+[2026-07-10-fix-serve-log-host-ipv6-crash.md](2026-07-10-fix-serve-log-host-ipv6-crash.md)
+for the actual fix: a `try/except (OSError, OverflowError)` around server
+construction that catches the whole class of construction-time bind
+failures (unresolvable host, IPv6 literal in any form, port already in
+use, out-of-range port), not only the one input shape this session
+happened to test. IPv6 bind support itself is intentionally not added,
+and the non-localhost-warning allowlist stays `("127.0.0.1", "localhost")` —
+`--host ::1` now correctly both warns (it is not localhost-bindable here)
+and exits 2 with the clean bind error.
 
 ### Dependencies
 - Requires: Phase 2

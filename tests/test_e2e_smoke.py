@@ -193,6 +193,48 @@ def test_cli_run_requires_edge(monkeypatch, capsys):
     assert "required" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("host", ["::1", "[::1]", "::"])
+def test_cli_serve_log_rejects_unbindable_host(host, capsys):
+    """serve-log only supports IPv4 binds; an unresolvable/IPv6 host must
+    exit 2 with a clear error, not crash with an uncaught OSError.
+
+    --no-open matters: if the bind ever unexpectedly SUCCEEDS (the exact
+    regression this guards, e.g. a future AF_INET6 change), the command would
+    otherwise open a real browser and block in serve_forever(), turning a
+    should-fail test into a hang instead of a red assert.
+    """
+    assert cli.main(["serve-log", "--host", host, "--port", "0", "--no-open"]) == 2
+    err = capsys.readouterr().err
+    assert "cannot bind" in err
+
+
+def test_cli_serve_log_rejects_port_already_in_use(tmp_path, capsys):
+    """A second serve-log on an already-bound port must exit 2 cleanly,
+    not crash with an uncaught OSError (EADDRINUSE)."""
+    from node_agent.logwall import LogWallServer
+
+    busy = LogWallServer(tmp_path / "joblog.jsonl", host="127.0.0.1", port=0)
+    try:
+        assert cli.main(
+            ["serve-log", "--host", "127.0.0.1", "--port", str(busy.port), "--no-open"]
+        ) == 2
+        err = capsys.readouterr().err
+        assert "cannot bind" in err
+        assert str(busy.port) in err
+    finally:
+        busy._httpd.server_close()
+
+
+def test_cli_serve_log_rejects_out_of_range_port(capsys):
+    """A port outside 0-65535 raises OverflowError (not OSError) at bind time
+    -- must be caught alongside OSError, not crash with an uncaught traceback."""
+    assert cli.main(
+        ["serve-log", "--host", "127.0.0.1", "--port", "99999", "--no-open"]
+    ) == 2
+    err = capsys.readouterr().err
+    assert "cannot bind" in err
+
+
 def test_cmd_run_skips_registration_if_flag_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
     monkeypatch.setattr(cli, "DEFAULT_KEY_PATH", tmp_path / "agent.key")
