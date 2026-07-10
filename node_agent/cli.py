@@ -86,6 +86,40 @@ def cmd_leave(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve_log(args: argparse.Namespace) -> int:
+    """Start the local log-wall dashboard."""
+    from node_agent.logwall import LogWallServer, DEFAULT_HOST, DEFAULT_PORT
+
+    host = (
+        args.host
+        if args.host is not None
+        else os.environ.get("LUSTRO_LOGWALL_HOST", DEFAULT_HOST)
+    )
+    if args.port is not None:
+        port = args.port
+    else:
+        try:
+            port = int(os.environ.get("LUSTRO_LOGWALL_PORT", DEFAULT_PORT))
+        except ValueError:
+            print("error: LUSTRO_LOGWALL_PORT must be an integer", file=sys.stderr)
+            return 2
+    if host not in ("127.0.0.1", "localhost"):
+        print(
+            f"warning: binding to {host}; dashboard reachable beyond this machine",
+            file=sys.stderr,
+        )
+    try:
+        server = LogWallServer(DEFAULT_JOBLOG_PATH, host=host, port=port)
+    except (OSError, OverflowError) as exc:
+        print(f"error: cannot bind {host}:{port}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        server.start(open_browser=not args.no_open)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="node-agent")
     sub = p.add_subparsers(dest="command", required=True)
@@ -103,6 +137,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     leave_p = sub.add_parser("leave", help="delete all local state and exit")
     leave_p.set_defaults(func=cmd_leave)
+
+    serve_p = sub.add_parser(
+        "serve-log", help="start a local web dashboard for the job log"
+    )
+    serve_p.add_argument(
+        "--host", default=None,
+        help="bind host (default 127.0.0.1)"
+    )
+    serve_p.add_argument(
+        "--port", type=int, default=None,
+        help="port (default 8787)"
+    )
+    serve_p.add_argument(
+        "--no-open", action="store_true",
+        help="do not open browser"
+    )
+    serve_p.set_defaults(func=cmd_serve_log)
 
     return p
 
