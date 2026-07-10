@@ -18,12 +18,15 @@ Engineers are right to be suspicious of "run our agent on your machine." Here is
 the short, falsifiable answer — each point is enforced in code and covered by a
 test, not just asserted here.
 
-- **Outbound-only — it cannot proxy.** The agent talks to exactly ONE host: the
-  edge URL you configure. Every request is checked against an allowlist
-  (`node_agent/egress.py`); any other host is refused with an `EgressViolation`.
-  A malicious or compromised work unit cannot make your machine fetch arbitrary
-  URLs, and it opens no inbound ports — so you are not an exit node, relay, or
-  proxy for anyone.
+- **Outbound-only — the classifier loop cannot proxy.** The agent talks to
+  exactly ONE host: the edge URL you configure. Every request is checked
+  against an allowlist (`node_agent/egress.py`); any other host is refused
+  with an `EgressViolation`. A malicious or compromised work unit cannot make
+  your machine fetch arbitrary URLs. The loop itself opens no inbound ports —
+  so you are not an exit node, relay, or proxy for anyone. The optional
+  `serve-log` dashboard (below) is a separate, local-only, read-only command
+  you explicitly start; it never talks to the edge or proxies traffic, but see
+  its own security note for what it does change.
 - **Signed + inspectable — nothing is hidden.** Every work unit is signed by the
   LUSTRO core and verified against a *pinned* core public key before it runs
   (key-id mismatch or bad signature ⇒ rejected). Every job you process is
@@ -107,6 +110,41 @@ systemd timer) for continuous participation.
 docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   ghcr.io/projektlustro/node-agent:latest leave
 ```
+
+## Inspect the log in a browser
+
+For a live view of the same job log, run the local dashboard:
+
+```bash
+node-agent serve-log
+```
+
+This opens `http://127.0.0.1:8787` in your browser and updates as new work
+units are processed. It binds to `127.0.0.1` by default, is read-only, and
+makes no outbound calls. Do not pass `--host 0.0.0.0` unless you intend to
+expose the dashboard to every device on the local network.
+
+With Docker, publish the port from the host. The default `127.0.0.1` bind
+does not work inside a container with `-p` (Docker's port mapping forwards to
+the container's network interface, not its loopback), so use
+`--host 0.0.0.0` and rely on the host-side `-p` mapping to keep it on
+localhost:
+
+```bash
+docker run --rm --pull=always \
+  -p 127.0.0.1:8787:8787 \
+  -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+  ghcr.io/projektlustro/node-agent:latest serve-log --host 0.0.0.0 --no-open
+```
+
+**serve-log security note**: the dashboard exposes the same data that is
+normally protected by the `0600` permissions on `joblog.jsonl` to any process
+running as your user (and, with `--host 0.0.0.0`, to the local network). It
+rejects requests whose `Host` header is a DNS name rather than a literal IP
+address or `localhost`, as defence against DNS-rebinding attacks from a
+malicious web page you have open in another tab — but it is still a local
+inspectability convenience, not part of the classifier loop's outbound-only
+guarantee.
 
 **Bind-mount ownership note**: the container's non-root user has a fixed
 UID that may not match the host user who created `~/.lustro-node-agent`
