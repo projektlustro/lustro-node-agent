@@ -242,7 +242,7 @@ def test_cmd_run_skips_registration_if_flag_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
     (tmp_path / "registered").write_text("existing", encoding="utf-8")
 
-    def _should_not_register(self, http=None):
+    def _should_not_register(self, http=None, invite_token=""):
         raise AssertionError("register_agent must not be called when flag exists")
 
     monkeypatch.setattr(NodeAgentClient, "register_agent", _should_not_register)
@@ -257,7 +257,7 @@ def test_cmd_run_exits_2_if_registration_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "DEFAULT_JOBLOG_PATH", tmp_path / "joblog.jsonl")
     monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
 
-    def _fail_register(self, http=None):
+    def _fail_register(self, http=None, invite_token=""):
         req = httpx.Request("POST", f"{EDGE}/v1/wu/register-agent")
         resp = httpx.Response(500, request=req)
         raise httpx.HTTPStatusError("500 Server Error", request=req, response=resp)
@@ -273,7 +273,9 @@ def test_cmd_run_writes_flag_after_successful_registration(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "DEFAULT_JOBLOG_PATH", tmp_path / "joblog.jsonl")
     monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
 
-    monkeypatch.setattr(NodeAgentClient, "register_agent", lambda self, http=None: None)
+    monkeypatch.setattr(
+        NodeAgentClient, "register_agent", lambda self, http=None, invite_token="": None
+    )
     monkeypatch.setattr(NodeAgentClient, "pull_and_process", lambda self, http=None: None)
 
     cli.main(["run", "--stub"])
@@ -287,7 +289,9 @@ def test_cmd_run_pulls_after_successful_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "DEFAULT_JOBLOG_PATH", tmp_path / "joblog.jsonl")
     monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
 
-    monkeypatch.setattr(NodeAgentClient, "register_agent", lambda self, http=None: None)
+    monkeypatch.setattr(
+        NodeAgentClient, "register_agent", lambda self, http=None, invite_token="": None
+    )
     monkeypatch.setattr(
         NodeAgentClient,
         "pull_and_process",
@@ -295,3 +299,25 @@ def test_cmd_run_pulls_after_successful_registration(tmp_path, monkeypatch):
     )
 
     assert cli.main(["run", "--stub"]) == 0
+
+
+def test_cmd_run_forwards_invite_token_from_env(tmp_path, monkeypatch):
+    """N3: the CLI reads LUSTRO_NODE_INVITE_TOKEN and forwards it to
+    register_agent on first run, so a production (invite-gated) core enrols
+    the volunteer instead of rejecting the open registration."""
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "DEFAULT_KEY_PATH", tmp_path / "agent.key")
+    monkeypatch.setattr(cli, "DEFAULT_JOBLOG_PATH", tmp_path / "joblog.jsonl")
+    monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
+    monkeypatch.setenv("LUSTRO_NODE_INVITE_TOKEN", "invite-7:cafef00d")
+
+    seen = {}
+
+    def _capture_register(self, http=None, invite_token=""):
+        seen["invite_token"] = invite_token
+
+    monkeypatch.setattr(NodeAgentClient, "register_agent", _capture_register)
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", lambda self, http=None: None)
+
+    assert cli.main(["run", "--stub"]) == 0
+    assert seen["invite_token"] == "invite-7:cafef00d"

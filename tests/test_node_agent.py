@@ -810,3 +810,53 @@ def test_register_agent_non_2xx_raises(tmp_path):
 
     events = [r["event"] for r in jl.read_all()]
     assert "agent_registered" not in events
+
+
+class _CapturingHttp:
+    """Records the JSON body of the register POST so tests can assert what the
+    agent actually sent to the edge."""
+
+    def __init__(self):
+        self.sent_json = None
+
+    def post(self, url, json=None):
+        self.sent_json = json
+
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                pass
+
+        return _R()
+
+    def close(self):
+        pass
+
+
+def test_register_agent_sends_invite_token_when_provided(tmp_path):
+    # N3: a production core gates registration behind an invite token; the
+    # agent must forward it in the register body.
+    keys = _agent_keys(tmp_path)
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+    http = _CapturingHttp()
+
+    client.register_agent(http=http, invite_token="invite-001:deadbeef")
+
+    assert http.sent_json["agent_pubkey"] == keys.public_key_raw_b64()
+    assert http.sent_json["invite_token"] == "invite-001:deadbeef"
+
+
+def test_register_agent_omits_invite_token_when_absent(tmp_path):
+    # Open dev/local core: no invite token -> the key must NOT appear in the
+    # body at all (not sent as an empty string), so the open path is unchanged.
+    keys = _agent_keys(tmp_path)
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+    http = _CapturingHttp()
+
+    client.register_agent(http=http)
+
+    assert "invite_token" not in http.sent_json

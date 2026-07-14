@@ -260,10 +260,20 @@ class NodeAgentClient:
         )
         return body
 
-    def register_agent(self, http: httpx.Client | None = None) -> None:
-        """Register this node with the edge on first run."""
+    def register_agent(
+        self, http: httpx.Client | None = None, invite_token: str = ""
+    ) -> None:
+        """Register this node with the edge on first run.
+
+        A production core gates registration behind an operator-minted invite
+        token (LUSTRO node N3): pass it here (the CLI reads
+        LUSTRO_NODE_INVITE_TOKEN). A dev/local core leaves registration open,
+        so an empty token is fine and simply omitted from the request.
+        """
         url = self._egress.check(f"{self._edge}/v1/wu/register-agent")
         body = {"agent_pubkey": self._keys.public_key_raw_b64()}
+        if invite_token:
+            body["invite_token"] = invite_token
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:

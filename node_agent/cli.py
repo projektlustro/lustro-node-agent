@@ -40,8 +40,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     registered_path = STATE_DIR / "registered"
     if not registered_path.exists():
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        invite_token = os.environ.get("LUSTRO_NODE_INVITE_TOKEN", "")
         try:
-            client.register_agent()
+            client.register_agent(invite_token=invite_token)
             registered_path.write_text(keys.public_key_raw_b64(), encoding="utf-8")
         except Exception as exc:
             print(f"error: registration failed: {exc}", file=sys.stderr)

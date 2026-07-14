@@ -50,7 +50,11 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
 ```
 
 0. **Register** (first run only): POST your local public key to
-   `/v1/wu/register-agent`. If this fails (e.g. the edge is unreachable or
+   `/v1/wu/register-agent`. A production core gates this behind a single-use
+   operator invite: set `LUSTRO_NODE_INVITE_TOKEN` to the token you were issued
+   and the agent forwards it in the register body. A dev/local core leaves
+   registration open, so the token is optional there. If registration fails
+   (e.g. the edge is unreachable, the invite is missing/invalid, or the edge
    returns a server error), `run` exits with a clear error naming this URL —
    that's what you're seeing if this is the first thing that fails.
 1. **Pull** the next work unit from the edge.
@@ -67,9 +71,12 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
 This repo is public — anyone can read the code and verify the guarantees
 above. Running it against a **real** edge, however, means joining the
 volunteer program: sign up at [projektlustro.eu](https://projektlustro.eu) to
-be pointed at the current edge URL. Wire-level agent authorization beyond
-that (mTLS or a signed JWT) is on the LUSTRO roadmap, not yet built —
-registration on the wire is intentionally open today. See "Why this is NOT a
+be pointed at the current edge URL and issued an **invite token**. The
+production core requires that token on first registration (a single-use,
+operator-minted `invite_id:mac` — see below); a self-generated key with no
+invite cannot enrol, and only enrolled keys can submit results. Pass it via
+`LUSTRO_NODE_INVITE_TOKEN`. Stronger wire-level agent authorization (mTLS or a
+signed JWT per request) is still on the roadmap. See "Why this is NOT a
 botnet" above for what's actually enforced right now.
 
 ## Usage
@@ -93,6 +100,7 @@ mkdir -p ~/.lustro-node-agent
 docker run --rm --pull=always \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://edge.lustro.example \
+  -e LUSTRO_NODE_INVITE_TOKEN=<your-invite-token> \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)
