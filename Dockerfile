@@ -17,6 +17,10 @@ ENV PYTHONPATH=/agent/deps
 # to a known, host-mountable path regardless of what /etc/passwd the DHI
 # runtime image ships for its default non-root user.
 ENV HOME=/agent
+# Production pinned core public key (raw Ed25519, base64). Public, not secret.
+# CI can override via --build-arg; volunteers can still override at runtime.
+ARG PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90=
+ENV LUSTRO_NODE_AGENT_PINNED_KEY_B64=${PINNED_KEY_B64}
 COPY --from=build /agent/deps /agent/deps
 COPY node_agent/ ./node_agent/
 

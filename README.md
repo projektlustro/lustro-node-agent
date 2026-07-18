@@ -96,12 +96,13 @@ cosign verify \
 #    persistent local state (your key + job log survive between runs).
 #    --pull=always guards against running a stale cached :latest if you
 #    (or a fix) pulled this image before.
+#    The published image already contains the pinned core public key, so you
+#    only need to provide your invite token.
 mkdir -p ~/.lustro-node-agent
 docker run --rm --pull=always \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
   -e LUSTRO_NODE_INVITE_TOKEN=REPLACE_WITH_INVITE_TOKEN \
-  -e LUSTRO_NODE_AGENT_PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90= \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)

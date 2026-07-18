@@ -69,5 +69,7 @@ jobs:
         with:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            PINNED_KEY_B64=${{ vars.LUSTRO_NODE_AGENT_PINNED_KEY_B64 }}
       - uses: sigstore/cosign-installer@v3
       - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/node-agent@${{ steps.build.outputs.digest }}
