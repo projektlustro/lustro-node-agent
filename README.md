@@ -99,8 +99,9 @@ cosign verify \
 mkdir -p ~/.lustro-node-agent
 docker run --rm --pull=always \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
-  -e LUSTRO_NODE_EDGE_URL=https://edge.lustro.example \
+  -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
   -e LUSTRO_NODE_INVITE_TOKEN=<your-invite-token> \
+  -e LUSTRO_NODE_AGENT_PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90= \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)
@@ -177,7 +178,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pytest -q
 
-python -m node_agent.cli run --edge https://edge.lustro.example
+LUSTRO_NODE_AGENT_PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90= \
+  python -m node_agent.cli run --edge https://projektlustro.eu
 python -m node_agent.cli dump-log
 python -m node_agent.cli leave
 ```
