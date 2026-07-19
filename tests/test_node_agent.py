@@ -348,8 +348,9 @@ def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
 
     out = client.pull_and_process(http=http)
 
-    # The result body conforms to the FROZEN WorkUnitResult contract.
-    assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig"}
+    # The result body conforms to the FROZEN WorkUnitResult contract +
+    # text_preview (added for CLI display, not part of the signed contract).
+    assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig", "text_preview"}
     assert out["labels"] == ["disinfo"]
     assert out["score"] == 0.91
     # agent_pubkey is base64 of the raw 32-byte public key (core wire format).

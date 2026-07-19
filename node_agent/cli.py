@@ -133,9 +133,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         invite_token = os.environ.get("LUSTRO_NODE_INVITE_TOKEN", "")
         if not invite_token:
-            _print_fail("No LUSTRO_NODE_INVITE_TOKEN set — registration will fail")
-            _print_fail("Get a token from the LUSTRO operator")
-            return 2
+            _print_ok("no invite token set — attempting open registration")
         try:
             client.register_agent(invite_token=invite_token)
             registered_path.write_text(keys.public_key_raw_b64(), encoding="utf-8")

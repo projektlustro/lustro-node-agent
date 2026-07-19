@@ -1,0 +1,83 @@
+{
+  "agents": [
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of log wall plan",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of log wall implementation",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Final adversarial review of complete branch",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "Explore",
+      "description": "Locate panel page and grafana link",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of IPv6 fix plan",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of core audit-durability plan",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of grafana node-agent read side",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "adversarial-reviewer",
+      "description": "Adversarial review of auto-apply plan",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "general-purpose",
+      "description": "Add infra/postgres path to deploy workflow",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "general-purpose",
+      "description": "Add apply step to deploy_core.sh grafana block",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    },
+    {
+      "type": "general-purpose",
+      "description": "Edit grafana_readonly_role.sql NOLOGIN+getenv",
+      "total_tokens": 0,
+      "tool_uses": 0,
+      "duration_ms": 0
+    }
+  ],
+  "total_tokens": 0,
+  "total_agents": 11
+}

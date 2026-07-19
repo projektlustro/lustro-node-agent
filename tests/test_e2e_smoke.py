@@ -77,7 +77,9 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     assert set(body) == {"labels", "score", "agent_pubkey", "agent_sig"}
     assert body["labels"] == ["kremlin-narrative"]
     assert body["score"] == 0.84
-    assert out == body
+    # out is the POSTed body + text_preview (CLI display only, not signed).
+    assert {k: out[k] for k in body} == body
+    assert out["text_preview"] == "Rosja niesie pokój"
 
     # The agent signature verifies against the LOCAL agent public key, and that
     # public key is the one we generated locally (the core never minted it).

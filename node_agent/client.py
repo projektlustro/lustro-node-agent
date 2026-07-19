@@ -267,8 +267,10 @@ class NodeAgentClient:
                 "text_preview": text_preview,
             }
         )
-        body["text_preview"] = text_preview
-        return body
+        # Return the contract body + text_preview (for CLI display only —
+        # text_preview is NOT part of the signed WorkUnitResult and is NOT
+        # POSTed to the core).
+        return {**body, "text_preview": text_preview}
 
     def register_agent(
         self, http: httpx.Client | None = None, invite_token: str = ""
