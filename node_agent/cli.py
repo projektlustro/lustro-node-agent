@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sys
+import textwrap
 from pathlib import Path
 
 from node_agent.classifier import KeywordClassifier, StubClassifier
@@ -20,6 +21,90 @@ from node_agent.joblog import DEFAULT_JOBLOG_PATH, JobLog
 from node_agent.keys import DEFAULT_KEY_PATH, ensure_keypair
 
 STATE_DIR = Path.home() / ".lustro-node-agent"
+
+# ASCII art LUSTRO logo — printed on every `run` invocation.
+_LOGO = r"""
+  _                         _             _
+ | |                       | |           | |
+ | |    __ _  ___ _ __ ___ | | ___   __ _| |
+ | |   / _` |/ _ \ '_ ` _ \| |/ _ \ / _` | |
+ | |__| (_| |  __/ | | | | | | (_) | (_| | |
+  \____\__,_|\___|_| |_| |_|_|\___/ \__,_|_|
+
+  volunteer node-agent · classify disinformation
+"""
+
+
+def _print_header(edge: str, registered: bool, pubkey: str | None) -> None:
+    """Print the LUSTRO banner + agent status block."""
+    print(_LOGO)
+    print("  " + "=" * 52)
+    print(f"  edge:      {edge}")
+    if registered and pubkey:
+        # Show first 16 chars of the public key as a fingerprint.
+        print(f"  agent:     registered (key {pubkey[:16]}...)")
+    else:
+        print("  agent:     NOT registered — will register with invite token")
+    print(f"  classifier: KeywordClassifier (Polish disinformation narratives)")
+    print("  " + "=" * 52)
+    print()
+
+
+def _print_step(num: int, label: str) -> None:
+    print(f"  [{num}] {label}...")
+
+
+def _print_ok(msg: str) -> None:
+    print(f"      ✓ {msg}")
+
+
+def _print_fail(msg: str) -> None:
+    print(f"      ✗ {msg}", file=sys.stderr)
+
+
+def _print_result(labels: list[str], score: float, text_preview: str) -> None:
+    """Print the classification result with context."""
+    label = labels[0] if labels else "unknown"
+    is_disinfo = label != "benign" and score >= 0.6
+
+    print()
+    print("  " + "-" * 52)
+    print("  CLASSIFICATION RESULT")
+    print("  " + "-" * 52)
+    print(f"  label:    {label}")
+    print(f"  score:    {score:.3f}")
+    print(f"  verdict:  {'⚠ DISINFORMATION DETECTED' if is_disinfo else '✓ benign'}")
+    print()
+    print("  classified text (first 200 chars):")
+    for line in textwrap.wrap(text_preview[:200], width=50):
+        print(f"    {line}")
+    print()
+    print("  " + "-" * 52)
+    print(f"  result submitted to core → stored as detection (pending_review)")
+    print()
+
+
+def _print_next_steps() -> None:
+    """Print friendly next steps for the volunteer."""
+    print("  NEXT STEPS")
+    print("  " + "=" * 52)
+    print("  • Run again to classify the next post:")
+    print("    docker run --rm --pull=always \\")
+    print("      -v ~/.lustro-node-agent:/agent/.lustro-node-agent \\")
+    print("      -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \\")
+    print("      ghcr.io/projektlustro/node-agent:latest")
+    print()
+    print("  • Schedule in cron for continuous participation:")
+    print("    */10 * * * * docker run --rm ... >> ~/.lustro-node-agent/cron.log 2>&1")
+    print()
+    print("  • View your job log:")
+    print("    docker run --rm -v ~/.lustro-node-agent:/agent/.lustro-node-agent \\")
+    print("      ghcr.io/projektlustro/node-agent:latest dump-log")
+    print()
+    print("  • Track your progress: https://projektlustro.eu/me")
+    print()
+    print("  Dziękujemy za udział w walce z dezinformacją! 🇵🇱")
+    print()
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -38,20 +123,50 @@ def cmd_run(args: argparse.Namespace) -> int:
         seen_path=DEFAULT_SEEN_PATH,
     )
     registered_path = STATE_DIR / "registered"
-    if not registered_path.exists():
+    is_registered = registered_path.exists()
+    pubkey = keys.public_key_raw_b64() if is_registered else None
+
+    _print_header(edge, is_registered, pubkey)
+
+    if not is_registered:
+        _print_step(1, "Registering agent with invite token")
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         invite_token = os.environ.get("LUSTRO_NODE_INVITE_TOKEN", "")
+        if not invite_token:
+            _print_fail("No LUSTRO_NODE_INVITE_TOKEN set — registration will fail")
+            _print_fail("Get a token from the LUSTRO operator")
+            return 2
         try:
             client.register_agent(invite_token=invite_token)
             registered_path.write_text(keys.public_key_raw_b64(), encoding="utf-8")
+            _print_ok(f"registered (key {keys.public_key_raw_b64()[:16]}...)")
         except Exception as exc:
-            print(f"error: registration failed: {exc}", file=sys.stderr)
+            _print_fail(f"registration failed: {exc}")
             return 2
+    else:
+        _print_step(1, "Agent already registered")
+        _print_ok(f"key {pubkey[:16]}... loaded from disk")
+
+    _print_step(2, "Pulling work unit from core")
     result = client.pull_and_process()
     if result is None:
-        print("no work available")
-    else:
-        print(f"processed wu -> labels={result['labels']} score={result['score']}")
+        print("      → no work available right now")
+        print()
+        _print_next_steps()
+        return 0
+
+    _print_ok(f"received (labels={result['labels']} score={result['score']})")
+
+    text_preview = result.get("text_preview", "")
+
+    _print_step(3, "Classifying content")
+    _print_ok(f"KeywordClassifier → {result['labels'][0]} ({result['score']:.3f})")
+
+    _print_step(4, "Submitting signed result to core")
+    _print_ok("accepted → stored as detection (pending_review)")
+
+    _print_result(result["labels"], result["score"], text_preview)
+    _print_next_steps()
     return 0
 
 

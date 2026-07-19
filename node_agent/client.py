@@ -255,9 +255,19 @@ class NodeAgentClient:
         # raises above and leaves the WU eligible for a later retry, rather than
         # being silently dropped as "already processed".
         self._mark_seen(wu)
+        # Store a text preview for the CLI + joblog inspectability.
+        text_preview = (self._payload_text(payload) or "")[:200]
         self._joblog.append(
-            {"event": "wu_processed", "wu_id": wu_id, "labels": body["labels"], "status": resp.status_code}
+            {
+                "event": "wu_processed",
+                "wu_id": wu_id,
+                "labels": body["labels"],
+                "score": body["score"],
+                "status": resp.status_code,
+                "text_preview": text_preview,
+            }
         )
+        body["text_preview"] = text_preview
         return body
 
     def register_agent(
