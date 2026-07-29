@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -62,7 +61,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/node-agent
           tags: |
             type=sha
-            type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
       - id: build
         uses: docker/build-push-action@v6

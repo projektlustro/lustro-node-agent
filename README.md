@@ -88,7 +88,7 @@ Run the published, signed container image — 3 steps.
 #    don't have it: https://docs.sigstore.dev/cosign/system_config/installation/,
 #    e.g. `brew install cosign` on macOS)
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/projektlustro/lustro-node-agent/\.github/workflows/ci\.yml@refs/(heads/main|tags/v.*)' \
+  --certificate-identity 'https://github.com/projektlustro/lustro-node-agent/.github/workflows/ci.yml@refs/heads/main' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   ghcr.io/projektlustro/node-agent:latest
 
@@ -109,6 +109,10 @@ docker run --rm --pull=always \
 docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   ghcr.io/projektlustro/node-agent:latest dump-log
 ```
+
+Production images are published only by a push to `main`. Tags and feature
+branches may be used for source organization and CI, but they cannot publish a
+container image.
 
 `node-agent run` is **one-shot**: it pulls and processes a single work unit,
 then exits. It is not a long-running loop. Schedule step 2 on cron (or a
