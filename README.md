@@ -65,6 +65,8 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
    model later).
 5. **Sign** the result `{wu_id, labels, score}` with your local Ed25519 key.
 6. **POST** the signed `WorkUnitResult` back to the edge.
+7. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id`
+   idempotently so the volunteer's `/me` dashboard reflects the run.
 
 ## Getting authorized
 
@@ -75,9 +77,15 @@ be pointed at the current edge URL and issued an **invite token**. The
 production core requires that token on first registration (a single-use,
 operator-minted `invite_id:mac` — see below); a self-generated key with no
 invite cannot enrol, and only enrolled keys can submit results. Pass it via
-`LUSTRO_NODE_INVITE_TOKEN`. Stronger wire-level agent authorization (mTLS or a
-signed JWT per request) is still on the roadmap. See "Why this is NOT a
-botnet" above for what's actually enforced right now.
+`LUSTRO_NODE_INVITE_TOKEN`.
+
+The separate `LUSTRO_NODE_TOKEN` comes from the Node-agent card in your
+authenticated `/me` panel. It attributes accepted work units to that volunteer
+account and can be rotated or revoked without replacing the agent's local
+Ed25519 key. It is never written to the job log. Stronger wire-level agent
+authorization (mTLS or a signed JWT on every core request) is still on the
+roadmap. See "Why this is NOT a botnet" above for what's actually enforced
+right now.
 
 ## Usage
 
@@ -97,12 +105,13 @@ cosign verify \
 #    --pull=always guards against running a stale cached :latest if you
 #    (or a fix) pulled this image before.
 #    The published image already contains the pinned core public key, so you
-#    only need to provide your invite token.
+#    provide the one-time invite and your revocable dashboard token.
 mkdir -p ~/.lustro-node-agent
 docker run --rm --pull=always \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
   -e LUSTRO_NODE_INVITE_TOKEN=REPLACE_WITH_INVITE_TOKEN \
+  -e LUSTRO_NODE_TOKEN=REPLACE_WITH_NODE_TOKEN \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)

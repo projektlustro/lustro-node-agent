@@ -79,16 +79,53 @@ class NodeAgentClient:
         keys: AgentKeys,
         joblog: JobLog,
         seen_path: Path | None = None,
+        participant_token: str = "",
     ) -> None:
         self._egress = EgressGuard(edge_base_url)
         self._edge = self._egress.allowed_base_url
         self._classifier = classifier
         self._keys = keys
         self._joblog = joblog
+        self._participant_token = participant_token
         self._seen_path = Path(seen_path) if seen_path is not None else DEFAULT_SEEN_PATH
         self._seen_wu_ids: set[str] = set()
         self._seen_nonces: set[str] = set()
         self._load_seen()
+
+    def _report_activity(
+        self,
+        *,
+        wu_id: str,
+        agent_pubkey: str,
+        http: httpx.Client,
+    ) -> None:
+        """Attribute an accepted result to the volunteer's `/me` account.
+
+        This is a second, idempotent write after the core accepts the signed
+        result. The frozen core result contract stays unchanged, and a temporary
+        telemetry failure never turns an already-consumed work unit into a
+        retry that the core would reject.
+        """
+        if not self._participant_token:
+            return
+        url = self._egress.check(f"{self._edge}/elfik/node/activity")
+        try:
+            response = http.post(
+                url,
+                json={"wu_id": wu_id, "agent_pubkey": agent_pubkey},
+                headers={"Authorization": f"Bearer {self._participant_token}"},
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, OSError) as exc:
+            self._joblog.append(
+                {
+                    "event": "activity_sync_failed",
+                    "wu_id": wu_id,
+                    "error": type(exc).__name__,
+                }
+            )
+            return
+        self._joblog.append({"event": "activity_synced", "wu_id": wu_id})
 
     def _load_seen(self) -> None:
         """Load previously-seen wu_ids/nonces so anti-replay survives restarts.
@@ -246,15 +283,20 @@ class NodeAgentClient:
         client = http or httpx.Client(timeout=30)
         try:
             resp = client.post(url, json=body)
+            resp.raise_for_status()
+
+            # Mark seen only AFTER a successful core POST: a transient delivery
+            # failure leaves the WU eligible for a later retry.
+            self._mark_seen(wu)
+            self._report_activity(
+                wu_id=wu_id,
+                agent_pubkey=body["agent_pubkey"],
+                http=client,
+            )
         finally:
             if owns_client:
                 client.close()
 
-        resp.raise_for_status()
-        # Mark seen only AFTER a successful POST: a transient delivery failure
-        # raises above and leaves the WU eligible for a later retry, rather than
-        # being silently dropped as "already processed".
-        self._mark_seen(wu)
         # Store a text preview for the CLI + joblog inspectability.
         text_preview = (self._payload_text(payload) or "")[:200]
         self._joblog.append(

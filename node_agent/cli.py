@@ -127,6 +127,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         keys=keys,
         joblog=joblog,
         seen_path=DEFAULT_SEEN_PATH,
+        participant_token=os.environ.get("LUSTRO_NODE_TOKEN", ""),
     )
     registered_path = STATE_DIR / "registered"
     is_registered = registered_path.exists()

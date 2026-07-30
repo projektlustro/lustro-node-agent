@@ -764,6 +764,96 @@ def test_non_2xx_result_leaves_wu_unseen(tmp_path, monkeypatch):
     assert "wu-500" not in client._seen_wu_ids
 
 
+def test_participant_token_syncs_accepted_work_to_dashboard(tmp_path, monkeypatch):
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    joblog = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient(
+        "https://edge.example.com",
+        StubClassifier("benign", 0.1),
+        keys,
+        joblog,
+        participant_token="participant-token",
+    )
+    wu = _signed_wu(
+        priv,
+        {"wu_id": "wu-attributed", "kind": "text", "payload": {"text": "hi"}},
+    )
+
+    class _ActivityHttp:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, json=None, headers=None):
+            self.posts.append((url, json, headers))
+
+            class _R:
+                status_code = 201
+
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+            return _R()
+
+        def close(self):
+            pass
+
+    http = _ActivityHttp()
+    client.process_wu(wu, http=http)
+
+    assert len(http.posts) == 2
+    activity_url, activity_body, activity_headers = http.posts[1]
+    assert activity_url == "https://edge.example.com/elfik/node/activity"
+    assert activity_body == {
+        "wu_id": "wu-attributed",
+        "agent_pubkey": keys.public_key_raw_b64(),
+    }
+    assert activity_headers == {"Authorization": "Bearer participant-token"}
+    assert "activity_synced" in [row["event"] for row in joblog.read_all()]
+
+
+def test_activity_sync_failure_does_not_retry_consumed_work_unit(
+    tmp_path, monkeypatch
+):
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    joblog = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient(
+        "https://edge.example.com",
+        StubClassifier("benign", 0.1),
+        keys,
+        joblog,
+        participant_token="participant-token",
+    )
+    wu = _signed_wu(
+        priv,
+        {"wu_id": "wu-sync-fails", "kind": "text", "payload": {"text": "hi"}},
+    )
+
+    class _ActivityFails:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, url, json=None, headers=None):
+            self.calls += 1
+            request = httpx.Request("POST", url)
+            if self.calls == 1:
+                return httpx.Response(202, request=request)
+            return httpx.Response(503, request=request)
+
+        def close(self):
+            pass
+
+    out = client.process_wu(wu, http=_ActivityFails())
+
+    assert out["labels"] == ["benign"]
+    assert "wu-sync-fails" in client._seen_wu_ids
+    assert "activity_sync_failed" in [row["event"] for row in joblog.read_all()]
+
+
 # --- register_agent ---
 
 def test_register_agent_on_first_run(tmp_path):

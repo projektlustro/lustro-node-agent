@@ -323,3 +323,27 @@ def test_cmd_run_forwards_invite_token_from_env(tmp_path, monkeypatch):
 
     assert cli.main(["run", "--stub"]) == 0
     assert seen["invite_token"] == "invite-7:cafef00d"
+
+
+def test_cmd_run_passes_participant_token_to_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "DEFAULT_KEY_PATH", tmp_path / "agent.key")
+    monkeypatch.setattr(cli, "DEFAULT_JOBLOG_PATH", tmp_path / "joblog.jsonl")
+    monkeypatch.setenv("LUSTRO_NODE_EDGE_URL", EDGE)
+    monkeypatch.setenv("LUSTRO_NODE_TOKEN", "volunteer-node-token")
+    (tmp_path / "registered").write_text("existing", encoding="utf-8")
+
+    captured = {}
+    original_init = NodeAgentClient.__init__
+
+    def _capture_init(self, *args, **kwargs):
+        captured["participant_token"] = kwargs.get("participant_token")
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(NodeAgentClient, "__init__", _capture_init)
+    monkeypatch.setattr(
+        NodeAgentClient, "pull_and_process", lambda self, http=None: None
+    )
+
+    assert cli.main(["run", "--stub"]) == 0
+    assert captured["participant_token"] == "volunteer-node-token"
