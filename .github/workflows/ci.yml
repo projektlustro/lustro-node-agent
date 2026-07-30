@@ -31,6 +31,12 @@ jobs:
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
       - run: docker build -t node-agent .
+      - name: Verify production core key is baked into the image
+        run: |
+          value="$(docker image inspect node-agent \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | sed -n 's/^LUSTRO_NODE_AGENT_PINNED_KEY_B64=//p')"
+          test -n "$value"
 
   docker-publish:
     needs: [test, docker-build]
@@ -67,7 +73,5 @@ jobs:
         with:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            PINNED_KEY_B64=${{ vars.LUSTRO_NODE_AGENT_PINNED_KEY_B64 }}
       - uses: sigstore/cosign-installer@v3
       - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/node-agent@${{ steps.build.outputs.digest }}

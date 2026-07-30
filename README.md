@@ -179,6 +179,12 @@ match the container's UID.
 The edge URL may also be supplied via `-e LUSTRO_NODE_EDGE_URL=...` as shown,
 or via `--edge` if running from source (see "Test" below).
 
+The published GHCR image contains the production core public key from the
+Dockerfile's pinned default. CI verifies that the resulting image has a
+non-empty `LUSTRO_NODE_AGENT_PINNED_KEY_B64` value before publishing, so a
+missing repository build variable cannot silently replace the pin with an
+empty value. Source runs still need the explicit value shown below.
+
 **Apple Silicon note**: only a `linux/amd64` image is published today. On an
 arm64 Mac, Docker runs it under emulation — it works, just slower to pull and
 start than a native image would be.
