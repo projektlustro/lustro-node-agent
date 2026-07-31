@@ -1,0 +1,28 @@
+# Mac Studio model-worker image. Build with a named model context:
+#
+# docker build --platform linux/arm64 \
+#   --build-context model=/path/to/nlp/data/models/nlp_analyzer/current \
+#   -f Dockerfile.macstudio-model -t lustro-node-agent:model .
+#
+# The 2.1 GB FastEmbed ONNX cache is deliberately mounted at runtime rather
+# than baked into this image. The container has no permission to download it.
+
+# syntax=docker/dockerfile:1
+FROM dhi.io/python:3.13-dev AS build
+WORKDIR /agent
+COPY requirements.txt .
+RUN pip install --no-cache-dir --target=/agent/deps -r requirements.txt
+
+FROM dhi.io/python:3.13
+WORKDIR /agent
+ENV PYTHONPATH=/agent/deps
+ENV HOME=/agent
+ARG PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90=
+ENV LUSTRO_NODE_AGENT_PINNED_KEY_B64=${PINNED_KEY_B64}
+ENV LUSTRO_NODE_MODEL_ROOT=/agent/model
+ENV LUSTRO_NODE_EMBED_CACHE=/agent/embed-cache
+COPY --from=build /agent/deps /agent/deps
+COPY node_agent/ ./node_agent/
+COPY --from=model . /agent/model/
+ENTRYPOINT ["python", "-m", "node_agent.cli"]
+CMD ["run"]

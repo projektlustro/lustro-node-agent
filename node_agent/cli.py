@@ -15,7 +15,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from node_agent.classifier import KeywordClassifier, StubClassifier
+from node_agent.classifier import ModelClassifier, StubClassifier
 from node_agent.client import DEFAULT_SEEN_PATH, NodeAgentClient
 from node_agent.joblog import DEFAULT_JOBLOG_PATH, JobLog
 from node_agent.keys import DEFAULT_KEY_PATH, ensure_keypair
@@ -51,7 +51,7 @@ def _print_header(edge: str, registered: bool, pubkey: str | None) -> None:
         print(f"  agent:     registered (key {pubkey[:16]}...)")
     else:
         print("  agent:     NOT registered — will register with invite token")
-    print(f"  classifier: KeywordClassifier (Polish disinformation narratives)")
+    print(f"  classifier: multilingual E5 model (artifact-backed local inference)")
     print("  " + "=" * 52)
     print()
 
@@ -120,7 +120,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     keys = ensure_keypair(DEFAULT_KEY_PATH)
     joblog = JobLog(DEFAULT_JOBLOG_PATH)
-    classifier = KeywordClassifier() if not args.stub else StubClassifier()
+    # ``--stub`` exists only for the offline protocol test suite.  Production
+    # runs are model-only and fail closed when the signed artifact is absent.
+    try:
+        classifier = StubClassifier() if args.stub else ModelClassifier()
+    except RuntimeError as exc:
+        _print_fail(f"model initialization failed: {exc}")
+        return 2
     client = NodeAgentClient(
         edge_base_url=edge,
         classifier=classifier,
@@ -165,7 +171,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     text_preview = result.get("text_preview", "")
 
     _print_step(3, "Classifying content")
-    _print_ok(f"KeywordClassifier → {result['labels'][0]} ({result['score']:.3f})")
+    _print_ok(f"multilingual E5 model → {result['labels'][0]} ({result['score']:.3f})")
 
     _print_step(4, "Submitting signed result to core")
     _print_ok("accepted → stored as detection (pending_review)")

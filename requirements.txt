@@ -1,3 +1,10 @@
 cryptography==46.0.4
 httpx==0.28.1
 pytest==9.1.1
+# Production inference runtime. The agent refuses to run without a verified
+# model artifact; these dependencies are not optional in the published image.
+fastembed==0.7.4
+joblib==1.5.3
+numpy==2.2.6
+onnxruntime==1.20.1
+scikit-learn==1.6.1

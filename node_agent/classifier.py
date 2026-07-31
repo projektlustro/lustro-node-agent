@@ -1,23 +1,22 @@
-"""Classifier abstraction for the node-agent.
+"""Local, artifact-backed classifiers for the node-agent.
 
-Two implementations ship with the agent:
-
-* ``KeywordClassifier`` — the default production classifier.  It is fully
-  local (zero external calls, respects the egress guard), requires no heavy
-  ML dependencies, and is trained on a small embedded corpus of Polish
-  disinformation narrative markers.  It is deliberately simple: the goal is
-  to *participate* in the community pipeline with a real signal, not to
-  achieve SOTA accuracy.
-
-* ``StubClassifier`` — deterministic, used in unit tests and smoke runs.
+Production inference is deliberately model-only.  A missing, malformed, or
+checksum-mismatched artifact is an error; the agent never silently degrades to
+keywords or a stub.  ``StubClassifier`` remains available exclusively for the
+offline protocol tests.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -29,206 +28,130 @@ class Classification:
 class Classifier(ABC):
     @abstractmethod
     def classify(self, content: str, lang: str | None = None) -> Classification:
-        """Classify a piece of content, returning a label and confidence score."""
         raise NotImplementedError
 
 
-# --------------------------------------------------------------------------- #
-# KeywordClassifier — lightweight, local, zero-dependency classifier
-# --------------------------------------------------------------------------- #
-
-# Normalised (lower-case, no diacritics) narrative keyword weights.
-# Weights are hand-tuned on a small held-out corpus of Polish CIB content.
-# Higher weight = stronger indicator.  Negative weights push toward benign.
-#
-# Categories:
-#   kremlin-narrative — direct Kremlin-aligned talking points
-#   anti-ukraine      — anti-Ukrainian sentiment / false claims
-#   anti-nato         — NATO/EU scepticism pushed as disinformation
-#   benign            — counter-indicators (fact-checking language, etc.)
-_NARRATIVE_KEYWORDS: dict[str, dict[str, float]] = {
-    "kremlin-narrative": {
-        # Kremlin-aligned narratives in Polish
-        "rosja niesie pokoj": 2.5,
-        "denazyfikacja ukrainy": 3.0,
-        "ukraina to nazisci": 2.5,
-        "banderyzmu": 1.5,
-        "wojna proxy usa": 2.0,
-        "zachod prowokuje": 1.8,
-        "rosja obronila sie": 2.0,
-        "putin ma racje": 2.5,
-        "ukrainskie zbrodnie": 1.5,
-        "bucha to prowokacja": 3.0,
-        "azow to nazisci": 2.5,
-        "rosyjska armia wyzwala": 2.5,
-        "zachod chce wojny": 1.5,
-        # English variants (some cross-posting)
-        "russia brings peace": 2.5,
-        "denazification of ukraine": 3.0,
-        "nato expansion is the cause": 1.8,
-        "bucha was staged": 3.0,
-    },
-    "anti-ukraine": {
-        "ukraincy kradna": 1.5,
-        "ukraincy sa zlodziejami": 1.8,
-        "uchodzcy ukrainscy problem": 1.2,
-        "pomoc dla ukrainy to strata": 1.5,
-        "ukraina zdradza polske": 2.0,
-        "wolyn ponownie": 1.5,
-        "ukrainski nacjonalizm": 1.2,
-    },
-    "anti-nato": {
-        "nato to agresor": 2.0,
-        "nato prowokuje rosje": 2.0,
-        "unia europejska dyktatura": 1.5,
-        "ue chce zniszczyc polske": 1.8,
-        "eurokraci": 1.2,
-        "polska powinna wyjsc z unii": 1.5,
-        "polska powinna wyjsc z nato": 2.0,
-        "suwerennosc polski zagrozona": 1.2,
-    },
-    "benign": {
-        # Counter-indicators: fact-checking, source-citing language
-        "sprawdzam fakty": -1.5,
-        "weryfikuje informacje": -1.2,
-        "zrodlo": -0.5,
-        "wedlug danych": -0.8,
-        "nie potwierdza sie": -1.0,
-        "fake news": -1.2,
-        "dezinformacja": -0.8,
-        "sprawdzona informacja": -1.0,
-    },
-}
-
-# Normalisation: strip Polish diacritics for matching
-_DIACRITIC_MAP = str.maketrans(
-    "ąćęłńóśźż",
-    "acelnoszz"
-)
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _normalise(text: str) -> str:
-    """Lower-case and strip Polish diacritics for keyword matching."""
-    return text.lower().translate(_DIACRITIC_MAP)
+def _lexical_features(text: str, source_name: str = "") -> list[float]:
+    """Keep the eight auxiliary features identical to the training pipeline."""
+    words = re.findall(r"\w+", text, re.UNICODE)
+    word_count = max(len(words), 1)
+    upper_count = sum(1 for char in text if char.isupper())
+    alpha_count = max(sum(1 for char in text if char.isalpha()), 1)
+    source = source_name.lower()
+    lowered = text.lower()
+    return [
+        min(len(text), 5000) / 5000,
+        min(word_count, 1000) / 1000,
+        min(text.count("!"), 10) / 10,
+        min(text.count("?"), 10) / 10,
+        upper_count / alpha_count,
+        min(len(re.findall(r"https?://\S+", text, re.IGNORECASE)), 10) / 10,
+        1.0 if any(token in source for token in ("wrealu", "newsfront", "zmianynaziemi", "wolnemedia")) else 0.0,
+        1.0 if any(token in lowered for token in ("ukraina", "nato", "bruksela", "gaz", "prad", "prąd")) else 0.0,
+    ]
 
 
-def _score_text(text: str) -> dict[str, float]:
-    """Return per-label raw scores for *text*."""
-    norm = _normalise(text)
-    scores: dict[str, float] = {}
-    for label, keywords in _NARRATIVE_KEYWORDS.items():
-        total = 0.0
-        for phrase, weight in keywords.items():
-            # Use regex word-boundary-ish matching: phrase as substring
-            # with optional word boundaries for short phrases
-            if len(phrase) <= 4:
-                # Short words: require word boundary
-                pattern = r"(?:^|\s|[.,;:!?])" + re.escape(phrase) + r"(?:$|\s|[.,;:!?])"
-                matches = len(re.findall(pattern, norm, re.MULTILINE))
-            else:
-                matches = norm.count(phrase)
-            total += matches * weight
-        scores[label] = total
-    return scores
+class ModelClassifier(Classifier):
+    """Run the signed multilingual E5 + classifier artifact locally."""
 
+    def __init__(self, model_root: str | Path | None = None) -> None:
+        raw_root = model_root or os.environ.get("LUSTRO_NODE_MODEL_ROOT")
+        if not raw_root:
+            raise RuntimeError("LUSTRO_NODE_MODEL_ROOT is required; model-only mode has no fallback")
+        self.model_root = Path(raw_root)
 
-def _sigmoid(x: float) -> float:
-    """Squash a raw score into (0, 1)."""
-    x = max(-20.0, min(20.0, x))
-    return 1.0 / (1.0 + math.exp(-x))
+        self.card = self._read_json("model_card.json")
+        self.embedding_model = self._read_json("embedder_config.json").get("embedding_model")
+        if not self.embedding_model:
+            raise RuntimeError("model artifact has no embedding_model")
+        self.feature_config = self._read_json("feature_config.json") if (self.model_root / "feature_config.json").exists() else {}
+        self.calibration = self._read_json("calibration.json") if (self.model_root / "calibration.json").exists() else {}
 
+        classifier_path = self.model_root / "disinfo_classifier.joblib"
+        expected = (self.card.get("checksums") or {}).get(classifier_path.name)
+        if not expected:
+            raise RuntimeError("model card has no classifier checksum")
+        if _sha256(classifier_path) != expected:
+            raise RuntimeError("model classifier checksum mismatch")
 
-def _confidence(num_hits: int, net_score: float) -> float:
-    """Confidence from number of distinct keyword hits and net score.
+        try:
+            import joblib
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise RuntimeError(f"model runtime dependency missing: {exc}") from exc
 
-    A single keyword hit is a weak signal.  We apply diminishing returns
-    per hit (cap at 5) so that for a payload with keyword weight 2.5/hit:
+        cache_dir = os.environ.get("LUSTRO_NODE_EMBED_CACHE")
+        if not cache_dir:
+            raise RuntimeError("LUSTRO_NODE_EMBED_CACHE is required; model weights must be preloaded")
+        if not Path(cache_dir).exists():
+            raise RuntimeError(f"embedding cache is missing: {cache_dir}")
+        self._embedder = TextEmbedding(
+            model_name=self.embedding_model,
+            cache_dir=cache_dir,
+            local_files_only=True,
+        )
+        self._classifier = joblib.load(classifier_path)
+        self.model_version = str(self.card.get("model_version") or "unknown")
+        thresholds = self.calibration.get("thresholds_by_language") or {}
+        self._thresholds = {
+            key: float(value["threshold"])
+            for key, value in thresholds.items()
+            if isinstance(value, dict) and "threshold" in value
+        }
+        self._threshold = float(self.calibration.get("is_disinformation_threshold", 0.6))
 
-      * 1 hit  → ~0.73  (weak — one phrase)
-      * 2 hits → ~0.85  (moderate)
-      * 3+ hits → ~0.93  (strong)
-
-    Dampening: 1 - 0.60^n.  Sigmoid slope: 1.1.
-    """
-    if net_score <= 0 or num_hits <= 0:
-        return 0.0
-    import math
-    avg_hit_weight = net_score / max(num_hits, 1)
-    # Per-hit confidence: sigmoid(w * 0.44) → ~0.75 at w=2.5
-    per_hit = _sigmoid(avg_hit_weight * 0.44)
-    # Combined: noisy-OR with sqrt damping so each additional hit adds less.
-    # 1 hit → per_hit, 2 hits → 1-(1-p)^1.41, 4 hits → 1-(1-p)^2
-    combined = 1.0 - (1.0 - per_hit) ** math.sqrt(max(num_hits, 1))
-    # Rescale to use full [0,1] range
-    return combined
-
-
-class KeywordClassifier(Classifier):
-    """Lightweight, fully-local keyword-based classifier.
-
-    Uses a small embedded dictionary of Polish disinformation narrative
-    markers.  No external calls, no heavy dependencies — respects the egress
-    guard by construction.  Designed for participation, not SOTA accuracy.
-
-    Confidence is per-hit dampened so that a single keyword match produces a
-    moderate score (~0.78) and multiple corroborating phrases strengthen it.
-    Clean text and zero hits return benign with 0.0.
-    """
+    def _read_json(self, name: str) -> dict[str, Any]:
+        path = self.model_root / name
+        if not path.exists():
+            raise RuntimeError(f"model artifact missing: {path}")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid model artifact metadata: {path}") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError(f"model artifact metadata must be an object: {path}")
+        return value
 
     def classify(self, content: str, lang: str | None = None) -> Classification:
         if not content or not content.strip():
-            return Classification(label="benign", score=0.0)
+            return Classification(label="unverified", score=0.5)
 
-        scores = _score_text(content)
+        vector = next(self._embedder.embed([f"query: {content}" ]))
+        try:
+            import numpy as np
+            embedding = np.asarray([list(vector)], dtype="float32")
+            if self.feature_config.get("include_lexical_features", True):
+                lexical = np.asarray([_lexical_features(content)], dtype="float32")
+                matrix = np.hstack([embedding, lexical])
+            else:
+                matrix = embedding
+            if hasattr(self._classifier, "predict_proba"):
+                probability = float(self._classifier.predict_proba(matrix)[0, -1])
+            elif hasattr(self._classifier, "decision_function"):
+                score = float(self._classifier.decision_function(matrix)[0])
+                probability = 1.0 / (1.0 + math.exp(-score))
+            else:
+                probability = float(self._classifier.predict(matrix)[0])
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"model inference failed: {type(exc).__name__}") from exc
 
-        # Benign counter-indicators reduce the overall threat score
-        benign_score = scores.get("benign", 0.0)
-        threat_scores = {
-            k: v for k, v in scores.items() if k != "benign"
-        }
-
-        if not threat_scores:
-            return Classification(label="benign", score=0.0)
-
-        # Pick the strongest threat label
-        best_label = max(threat_scores, key=threat_scores.get)
-        best_score = threat_scores[best_label]
-
-        # No hits at all -> benign
-        if best_score <= 0.0:
-            return Classification(label="benign", score=0.0)
-
-        # Count distinct keyword hits for this label.
-        keywords = _NARRATIVE_KEYWORDS.get(best_label, {})
-        norm = _normalise(content)
-        hit_count = 0
-        for phrase in keywords:
-            if len(phrase) <= 4:
-                matches = re.findall(
-                    r"(?:^|\s|[.,;:!?])" + re.escape(phrase) + r"(?:$|\s|[.,;:!?])",
-                    norm, re.MULTILINE,
-                )
-                if matches:
-                    hit_count += len(matches)
-            elif phrase in norm:
-                hit_count += norm.count(phrase)
-
-        # Apply benign counter-indicators
-        net_score = best_score + benign_score
-
-        confidence = _confidence(hit_count, net_score)
-
-        # Conservative threshold for a keyword classifier.
-        if confidence < 0.60:
-            return Classification(label="benign", score=round(confidence, 3))
-
-        return Classification(label=best_label, score=round(confidence, 3))
+        threshold = self._thresholds.get((lang or "").split("-", 1)[0], self._threshold)
+        label = "misinformation" if probability >= threshold else "factual"
+        return Classification(label=label, score=round(max(0.0, min(1.0, probability)), 3))
 
 
 class StubClassifier(Classifier):
-    """Deterministic classifier for tests / smoke runs."""
+    """Deterministic classifier used only by offline protocol tests."""
 
-    def __init__(self, label: str = "benign", score: float = 0.0) -> None:
+    def __init__(self, label: str = "factual", score: float = 0.0) -> None:
         self._label = label
         self._score = score
 

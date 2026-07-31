@@ -61,8 +61,9 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
 2. **Verify** `core_sig` against the pinned core public key (reject on key-id
    mismatch or bad signature).
 3. **Anti-replay**: a repeated `wu_id` (or `nonce`, if present) is refused.
-4. **Classify** the payload with the local `StubClassifier` (swap in a real
-   model later).
+4. **Classify** the payload with the local, artifact-backed multilingual E5
+   model. Production runs fail closed if the model artifact is missing or its
+   checksum does not match the signed model card; there is no keyword fallback.
 5. **Sign** the result `{wu_id, labels, score}` with your local Ed25519 key.
 6. **POST** the signed `WorkUnitResult` back to the edge.
 7. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id`
@@ -122,6 +123,32 @@ docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent 
 Production images are published only by a push to `main`. Tags and feature
 branches may be used for source organization and CI, but they cannot publish a
 container image.
+
+### Model artifact
+
+The production agent requires `LUSTRO_NODE_MODEL_ROOT` containing the model
+bundle (`model_card.json`, `embedder_config.json`, `feature_config.json`,
+`calibration.json`, and `disinfo_classifier.joblib`). The model card checksum
+must match the classifier before inference begins. The multilingual E5 ONNX
+weights must already be present in `LUSTRO_NODE_EMBED_CACHE`; the agent does not
+download executable model material during a work unit.
+
+For the Mac Studio worker, point the agent at the promoted artifact in the NLP
+checkout and its pre-warmed FastEmbed cache:
+
+```bash
+export LUSTRO_NODE_MODEL_ROOT=/Users/jakubsikora/Repos/personal/lustro-nlp-analysis-remote/data/models/nlp_analyzer/current
+export LUSTRO_NODE_EMBED_CACHE=/Users/jakubsikora/Library/Caches/lustro-fastembed
+```
+
+Run from source on the Mac Studio with the project Python environment:
+
+```bash
+PYTHONPATH=/path/to/lustro-node-agent \
+LUSTRO_NODE_MODEL_ROOT=/path/to/lustro-nlp-analysis-remote/data/models/nlp_analyzer/current \
+LUSTRO_NODE_EMBED_CACHE=/Users/jakubsikora/Library/Caches/lustro-fastembed \
+python -m node_agent.cli run --edge https://projektlustro.eu
+```
 
 `node-agent run` is **one-shot**: it pulls and processes a single work unit,
 then exits. It is not a long-running loop. Schedule step 2 on cron (or a

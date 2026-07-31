@@ -1,0 +1,265 @@
+{
+  "model_version": "e5-large",
+  "created_at": "2026-07-29T18:04:18.605366+00:00",
+  "status": "trained",
+  "embedding_model": "intfloat/multilingual-e5-large",
+  "dataset_lock": {
+    "created_at": "2026-07-29T18:04:18.602400+00:00",
+    "training_jsonl": "data/training/canonical.jsonl",
+    "training_jsonl_sha256": "5550173cadb53b9dd7caf423070c62f77d50790d4eb694908e8071d67a8a9fec",
+    "total_strong_rows_used": 8306,
+    "positive_rows": 3329,
+    "negative_rows": 4977,
+    "distribution": {
+      "datasets": {
+        "polish_dual_reviewed": 1011,
+        "manual_polish_labels": 68,
+        "polfake": 7227
+      },
+      "languages": {
+        "pl": 8306
+      },
+      "labels": {
+        "factual": 4977,
+        "misinformation": 3329
+      },
+      "label_families": {
+        "dual_expert_polish_post": 1011,
+        "manual_polish_post_review": 68,
+        "polish_fact_checked_claim_veracity": 5774,
+        "polish_fact_checked_tweet_veracity": 1453
+      }
+    },
+    "required_datasets": [
+      "polish_dual_reviewed",
+      "polfake"
+    ]
+  },
+  "metrics": {
+    "eval_rows": 1662,
+    "positive_rows": 3329,
+    "negative_rows": 4977,
+    "threshold": 0.6,
+    "f1": 0.5659777424483307,
+    "precision": 0.6013513513513513,
+    "recall": 0.5345345345345346,
+    "brier_score": 0.22733403691192802,
+    "ece": 0.1294491012365012,
+    "pr_auc": 0.6271070546628837,
+    "recall_at_precision_0_85": 0.08258258258258258,
+    "false_positive_rate": 0.23694779116465864,
+    "credible_source_false_positive_rate": {
+      "rows": 82,
+      "false_positive_rate": 0.08536585365853659,
+      "false_positives": 7
+    },
+    "threshold_search": {
+      "threshold": 0.6,
+      "f1": 0.5659777424483307,
+      "precision": 0.6013513513513513,
+      "recall": 0.5345345345345346
+    },
+    "dataset_distribution": {
+      "polish_dual_reviewed": 1011,
+      "manual_polish_labels": 68,
+      "polfake": 7227
+    },
+    "language_distribution": {
+      "pl": 8306
+    },
+    "eval_by_dataset": {
+      "manual_polish_labels": {
+        "rows": 19,
+        "positive_rows": 8,
+        "negative_rows": 11,
+        "f1": 0.46153846153846156,
+        "precision": 0.6,
+        "recall": 0.375,
+        "pr_auc": 0.5849587912087912,
+        "recall_at_precision_0_85": 0.0,
+        "false_positives": 2,
+        "false_positive_rate": 0.18181818181818182,
+        "brier_score": 0.23719258633429852
+      },
+      "polfake": {
+        "rows": 1462,
+        "positive_rows": 639,
+        "negative_rows": 823,
+        "f1": 0.5716652858326429,
+        "precision": 0.6073943661971831,
+        "recall": 0.539906103286385,
+        "pr_auc": 0.6372976111486917,
+        "recall_at_precision_0_85": 0.08763693270735524,
+        "false_positives": 223,
+        "false_positive_rate": 0.2709599027946537,
+        "brier_score": 0.24264460902395962
+      },
+      "polish_dual_reviewed": {
+        "rows": 181,
+        "positive_rows": 19,
+        "negative_rows": 162,
+        "f1": 0.42105263157894735,
+        "precision": 0.42105263157894735,
+        "recall": 0.42105263157894735,
+        "pr_auc": 0.38912282780096313,
+        "recall_at_precision_0_85": 0.0,
+        "false_positives": 11,
+        "false_positive_rate": 0.06790123456790123,
+        "brier_score": 0.1026303415151585
+      }
+    },
+    "eval_by_language": {
+      "pl": {
+        "rows": 1662,
+        "positive_rows": 666,
+        "negative_rows": 996,
+        "f1": 0.5659777424483307,
+        "precision": 0.6013513513513513,
+        "recall": 0.5345345345345346,
+        "pr_auc": 0.6271070546628837,
+        "recall_at_precision_0_85": 0.08258258258258258,
+        "false_positives": 236,
+        "false_positive_rate": 0.23694779116465864,
+        "brier_score": 0.22733403691192802
+      }
+    },
+    "thresholds_by_language": {
+      "pl": {
+        "threshold": 0.6,
+        "positive_rows": 666,
+        "negative_rows": 996,
+        "metrics": {
+          "threshold": 0.6,
+          "f1": 0.5659777424483307,
+          "precision": 0.6013513513513513,
+          "recall": 0.5345345345345346
+        }
+      }
+    },
+    "thresholds_by_dataset": {
+      "polfake": {
+        "threshold": 0.6,
+        "positive_rows": 639,
+        "negative_rows": 823,
+        "metrics": {
+          "threshold": 0.6,
+          "f1": 0.5716652858326429,
+          "precision": 0.6073943661971831,
+          "recall": 0.539906103286385
+        }
+      },
+      "polish_dual_reviewed": {
+        "threshold": 0.6875,
+        "positive_rows": 19,
+        "negative_rows": 162,
+        "metrics": {
+          "threshold": 0.6875,
+          "f1": 0.45714285714285713,
+          "precision": 0.5,
+          "recall": 0.42105263157894735
+        }
+      }
+    },
+    "evaluation_splits": {
+      "time_based": {
+        "status": "ok",
+        "train_rows": 6644,
+        "eval_rows": 1661,
+        "threshold": 0.6,
+        "threshold_search": {
+          "threshold": 0.6,
+          "f1": 0.37757437070938216,
+          "precision": 0.358695652173913,
+          "recall": 0.39855072463768115
+        },
+        "metrics": {
+          "rows": 1661,
+          "positive_rows": 414,
+          "negative_rows": 1247,
+          "f1": 0.37757437070938216,
+          "precision": 0.358695652173913,
+          "recall": 0.39855072463768115,
+          "pr_auc": 0.36394140327464053,
+          "recall_at_precision_0_85": 0.0,
+          "false_positives": 295,
+          "false_positive_rate": 0.23656776263031276,
+          "brier_score": 0.23554748940234682
+        },
+        "credible_source_false_positive_rate": {
+          "rows": 437,
+          "false_positive_rate": 0.34324942791762014,
+          "false_positives": 150
+        }
+      },
+      "source_held_out": {
+        "status": "ok",
+        "train_rows": 1079,
+        "eval_rows": 7227,
+        "threshold": 0.6,
+        "threshold_search": {
+          "threshold": 0.6,
+          "f1": 0.06855439642324888,
+          "precision": 0.688622754491018,
+          "recall": 0.03607277289836888
+        },
+        "metrics": {
+          "rows": 7227,
+          "positive_rows": 3188,
+          "negative_rows": 4039,
+          "f1": 0.06855439642324888,
+          "precision": 0.688622754491018,
+          "recall": 0.03607277289836888,
+          "pr_auc": 0.5265360065500647,
+          "recall_at_precision_0_85": 0.0003136762860727729,
+          "false_positives": 52,
+          "false_positive_rate": 0.012874473879673186,
+          "brier_score": 0.41539366078231466
+        },
+        "credible_source_false_positive_rate": {
+          "rows": 0,
+          "false_positive_rate": null
+        }
+      },
+      "claim_held_out": {
+        "status": "skipped:insufficient_label_balance"
+      },
+      "topic_held_out": {
+        "status": "ok",
+        "train_rows": 5209,
+        "eval_rows": 3097,
+        "threshold": 0.6,
+        "threshold_search": {
+          "threshold": 0.6,
+          "f1": 0.5081123862287297,
+          "precision": 0.481981981981982,
+          "recall": 0.5372384937238494
+        },
+        "metrics": {
+          "rows": 3097,
+          "positive_rows": 1195,
+          "negative_rows": 1902,
+          "f1": 0.5081123862287297,
+          "precision": 0.481981981981982,
+          "recall": 0.5372384937238494,
+          "pr_auc": 0.5315618825273332,
+          "recall_at_precision_0_85": 0.022594142259414227,
+          "false_positives": 690,
+          "false_positive_rate": 0.3627760252365931,
+          "brier_score": 0.27584366370611085
+        },
+        "credible_source_false_positive_rate": {
+          "rows": 0,
+          "false_positive_rate": null
+        }
+      },
+      "adversarial_paraphrase": {
+        "status": "skipped:requires_explicit_generation_job",
+        "note": "Use a separate paraphrase generation/eval job; not run during normal CPU training."
+      }
+    }
+  },
+  "checksums": {
+    "disinfo_classifier.joblib": "b686b9909530e025b39d0736a43bfa31dcce08f6b1b5e8936b83db87c90ff13d"
+  },
+  "label_policy": "Trained only on strong_post_label rows with binary misinformation/factual labels."
+}
