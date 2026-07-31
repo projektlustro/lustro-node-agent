@@ -108,7 +108,8 @@ cosign verify \
 #    The published image already contains the pinned core public key, so you
 #    provide the one-time invite and your revocable dashboard token.
 mkdir -p ~/.lustro-node-agent
-docker run --rm --pull=always \
+# The current published image is linux/amd64; keep this flag on Apple Silicon.
+docker run --rm --pull=always --platform linux/amd64 \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
   -e LUSTRO_NODE_INVITE_TOKEN=REPLACE_WITH_INVITE_TOKEN \
@@ -116,13 +117,27 @@ docker run --rm --pull=always \
   ghcr.io/projektlustro/node-agent:latest
 
 # 3. Inspect every job you've processed (radical inspectability)
-docker run --rm --pull=always -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+docker run --rm --pull=always --platform linux/amd64 -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   ghcr.io/projektlustro/node-agent:latest dump-log
 ```
 
 Production images are published only by a push to `main`. Tags and feature
 branches may be used for source organization and CI, but they cannot publish a
 container image.
+
+If the agent says “already registered” and then receives `403 agent_pubkey not
+registered`, the local registration marker is stale. Remove only that marker
+and run again with a fresh invite:
+
+```bash
+rm ~/.lustro-node-agent/registered
+docker run --rm --pull=always --platform linux/amd64 \
+  -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
+  -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
+  -e LUSTRO_NODE_INVITE_TOKEN="$LUSTRO_INVITE_TOKEN" \
+  -e LUSTRO_NODE_TOKEN="$LUSTRO_NODE_TOKEN" \
+  ghcr.io/projektlustro/node-agent:latest
+```
 
 ### Model artifact
 
