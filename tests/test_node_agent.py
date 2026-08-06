@@ -951,3 +951,199 @@ def test_register_agent_omits_invite_token_when_absent(tmp_path):
     client.register_agent(http=http)
 
     assert "invite_token" not in http.sent_json
+
+
+# --- _ship_logs tests (Phase 1) ---
+
+
+def _make_joblog_with_entries(tmp_path):
+    """Create a joblog with entries containing text_preview and _parse_error.raw."""
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    jl.append({"event": "wu_processed", "wu_id": "wu-1", "labels": ["disinfo"], "score": 0.9, "text_preview": "First 200 chars of scraped content"})
+    jl.append({"event": "wu_processed", "wu_id": "wu-2", "labels": ["benign"], "score": 0.1, "text_preview": "Another scraped post preview"})
+    jl.append({"event": "_parse_error", "raw": "<html>adversary controlled content</html>"})
+    return jl
+
+
+class _ShipHttpCapturing:
+    """Captures POST calls to /v1/wu/node-logs."""
+    def __init__(self):
+        self.posts = []
+        self.next_status = 202
+
+    def post(self, url, json=None):
+        self.posts.append((url, json))
+
+        class _R:
+            status_code = 202
+
+            @staticmethod
+            def raise_for_status():
+                pass
+
+        return _R()
+
+    def close(self):
+        pass
+
+
+class _ShipHttp4xx:
+    """Simulates a 4xx rejection from the edge."""
+    def post(self, url, json=None):
+        req = httpx.Request("POST", url)
+        return httpx.Response(403, request=req)
+
+    def close(self):
+        pass
+
+
+class _ShipHttpTransportError:
+    """Simulates a transport error (connection refused)."""
+    def post(self, url, json=None):
+        raise httpx.ConnectError("Connection refused")
+
+    def close(self):
+        pass
+
+
+def test_ship_logs_signs_batch_and_strips_content(tmp_path, monkeypatch):
+    """_ship_logs signs batch_bytes, strips text_preview and _parse_error.raw before serializing."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    # Set up offset so we ship from start
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    http = _ShipHttpCapturing()
+    client._ship_logs(http=http, shipped_path=offset_file)
+
+    assert len(http.posts) == 1
+    url, body = http.posts[0]
+    assert "/v1/wu/node-logs" in url
+
+    # Body contains agent_pubkey, agent_sig, batch_bytes
+    assert "agent_pubkey" in body
+    assert "agent_sig" in body
+    assert "batch_bytes" in body
+
+    # Decode batch_bytes to verify content stripping
+    import base64
+    batch_json = json.loads(base64.b64decode(body["batch_bytes"]))
+
+    # Verify text_preview is stripped
+    for entry in batch_json:
+        assert "text_preview" not in entry
+
+    # Verify _parse_error.raw is stripped
+    for entry in batch_json:
+        if entry.get("event") == "_parse_error":
+            assert "raw" not in entry
+
+    # Verify signature is valid over batch_bytes
+    pub: Ed25519PublicKey = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(body["agent_pubkey"])
+    )
+    pub.verify(base64.b64decode(body["agent_sig"]), base64.b64decode(body["batch_bytes"]))
+
+
+def test_ship_logs_advances_cursor_on_success(tmp_path):
+    """_ship_logs advances the cursor after successful POST."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    http = _ShipHttpCapturing()
+    client._ship_logs(http=http, shipped_path=offset_file)
+
+    # Cursor should have advanced past all entries
+    new_offset = int(offset_file.read_text())
+    assert new_offset > 0
+
+
+def test_ship_logs_gaps_cursor_on_4xx(tmp_path):
+    """_ship_logs gaps the cursor (advances past batch) on 4xx rejection."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    http = _ShipHttp4xx()
+    client._ship_logs(http=http, shipped_path=offset_file)
+
+    # Cursor should have advanced past the failed batch (gap)
+    new_offset = int(offset_file.read_text())
+    assert new_offset > 0
+
+
+def test_ship_logs_does_not_advance_cursor_on_transport_error(tmp_path):
+    """_ship_logs does NOT advance cursor on transport error."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    http = _ShipHttpTransportError()
+    client._ship_logs(http=http, shipped_path=offset_file)
+
+    # Cursor should NOT have advanced
+    new_offset = int(offset_file.read_text())
+    assert new_offset == 0
+
+
+def test_ship_logs_canonical_json_format(tmp_path):
+    """_ship_logs uses canonical JSON: sort_keys, compact separators, ensure_ascii=False."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    http = _ShipHttpCapturing()
+    client._ship_logs(http=http, shipped_path=offset_file)
+
+    _, body = http.posts[0]
+    batch_json = json.loads(base64.b64decode(body["batch_bytes"]))
+
+    # Re-serialize canonically and verify byte-for-byte match
+    expected_bytes = json.dumps(batch_json, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    actual_bytes = base64.b64decode(body["batch_bytes"])
+    assert actual_bytes == expected_bytes
+
+
+def test_ship_logs_best_effort_never_raises(tmp_path):
+    """_ship_logs never raises — failures are logged to joblog."""
+    keys = _agent_keys(tmp_path)
+    jl = _make_joblog_with_entries(tmp_path)
+    client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
+
+    offset_dir = tmp_path / ".lustro-node-agent"
+    offset_dir.mkdir(parents=True, exist_ok=True)
+    offset_file = offset_dir / "shipped.offset"
+    offset_file.write_text("0")
+
+    # This should not raise even though transport fails
+    client._ship_logs(http=_ShipHttpTransportError(), shipped_path=offset_file)
+
+    # Check joblog for failure entry
+    events = [r["event"] for r in jl.read_all()]
+    assert "ship_logs_failed" in events

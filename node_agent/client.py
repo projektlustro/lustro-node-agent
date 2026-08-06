@@ -43,6 +43,11 @@ MAX_WU_TEXT_LEN = 64 * 1024
 # JSON — a crude first guard against a multi-hundred-MB response OOMing us.
 MAX_WU_RESPONSE_BYTES = 1024 * 1024
 
+# Byte-offset into the joblog marking which rows have been shipped to the
+# central log wall. Persisted alongside the joblog so a restart doesn't re-ship
+# old rows and multiple agents (docker + WASM) stay isolated.
+DEFAULT_SHIPPED_FILENAME = "shipped.offset"
+
 
 class ReplayError(Exception):
     """Raised when a work unit wu_id / nonce has already been processed."""
@@ -369,3 +374,79 @@ class NodeAgentClient:
         finally:
             if owns_client:
                 client.close()
+
+    def _ship_logs(
+        self,
+        http: httpx.Client | None = None,
+        shipped_path: Path | None = None,
+    ) -> None:
+        """Best-effort push of the joblog to the central log wall.
+
+        Ships the joblog rows after the persisted byte-offset to
+        ``{edge}/v1/wu/node-logs``. Scraped content (``text_preview`` and
+        ``_parse_error.raw``) is stripped before the batch leaves the machine.
+        The exact bytes POSTed as ``batch_bytes`` are what ``agent_sig`` signs
+        over, so the core verifies without re-serializing. Best-effort: never
+        raises; failures are logged to the joblog. On a rejected (non-2xx) batch
+        the cursor gaps past it so a poisoned batch can't wedge the ship loop;
+        on a transport error the cursor is left in place for a later retry.
+        """
+        shipped_path = shipped_path or self._joblog.path.with_name(DEFAULT_SHIPPED_FILENAME)
+        shipped_path.parent.mkdir(parents=True, exist_ok=True)
+        offset = 0
+        if shipped_path.exists():
+            try:
+                offset = int(shipped_path.read_text().strip() or "0")
+            except ValueError:
+                offset = 0
+
+        log_path = self._joblog.path
+        if not log_path.exists():
+            return
+        raw = log_path.read_bytes()
+        batch = raw[offset:]
+        if not batch.strip():
+            return
+
+        rows = []
+        for line in batch.splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                rec = {"event": "_parse_error"}
+            # Scraped content must never leave the volunteer machine.
+            rec.pop("text_preview", None)
+            rec.pop("raw", None)
+            rows.append(rec)
+
+        batch_bytes = json.dumps(
+            rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        body = {
+            "agent_pubkey": self._keys.public_key_raw_b64(),
+            "agent_sig": base64.b64encode(self._keys.sign(batch_bytes)).decode(),
+            "batch_bytes": base64.b64encode(batch_bytes).decode(),
+        }
+
+        url = self._egress.check(f"{self._edge}/v1/wu/node-logs")
+        owns_client = http is None
+        client = http or httpx.Client(timeout=30)
+        try:
+            resp = client.post(url, json=body)
+            if resp.status_code // 100 != 2:
+                # Rejected: gap the cursor past the batch so it can't wedge us.
+                shipped_path.write_text(str(offset + len(batch)))
+                self._joblog.append(
+                    {"event": "ship_logs_failed", "status": resp.status_code}
+                )
+                return
+        except httpx.HTTPError:
+            # Transport error: keep the cursor so the batch is retried.
+            self._joblog.append({"event": "ship_logs_failed", "error": "transport"})
+            return
+        finally:
+            if owns_client:
+                client.close()
+
+        shipped_path.write_text(str(offset + len(batch)))
+        self._joblog.append({"event": "logs_shipped", "rows": len(rows)})
