@@ -862,6 +862,20 @@ def test_register_agent_on_first_run(tmp_path):
     client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
 
     class _RegisterHttp:
+        def get(self, url):
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {"nonce": "test-nonce-on-first-run"}
+
+            return _R()
+
         def post(self, url, json=None):
             class _R:
                 status_code = 200
@@ -889,6 +903,20 @@ def test_register_agent_non_2xx_raises(tmp_path):
     client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
 
     class _Register500Http:
+        def get(self, url):
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {"nonce": "n"}
+
+            return _R()
+
         def post(self, url, json=None):
             req = httpx.Request("POST", url)
             return httpx.Response(500, request=req)
@@ -905,10 +933,29 @@ def test_register_agent_non_2xx_raises(tmp_path):
 
 class _CapturingHttp:
     """Records the JSON body of the register POST so tests can assert what the
-    agent actually sent to the edge."""
+    agent actually sent to the edge. Serves a nonce on GET /agent-nonce."""
 
-    def __init__(self):
+    def __init__(self, nonce: str = "server-issued-nonce-1"):
         self.sent_json = None
+        self.gets = []
+        self._nonce = nonce
+
+    def get(self, url):
+        self.gets.append(url)
+        nonce = self._nonce
+
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                pass
+
+            @staticmethod
+            def json():
+                return {"nonce": nonce}
+
+        return _R()
 
     def post(self, url, json=None):
         self.sent_json = json
@@ -928,7 +975,7 @@ class _CapturingHttp:
 
 def test_register_agent_sends_invite_token_when_provided(tmp_path):
     # N3: a production core gates registration behind an invite token; the
-    # agent must forward it in the register body.
+    # agent must forward it in the register body and must NOT fetch a nonce.
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
     client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
@@ -938,19 +985,23 @@ def test_register_agent_sends_invite_token_when_provided(tmp_path):
 
     assert http.sent_json["agent_pubkey"] == keys.public_key_raw_b64()
     assert http.sent_json["invite_token"] == "invite-001:deadbeef"
+    assert "agent_nonce" not in http.sent_json
+    assert http.gets == []
 
 
-def test_register_agent_omits_invite_token_when_absent(tmp_path):
-    # Open dev/local core: no invite token -> the key must NOT appear in the
-    # body at all (not sent as an empty string), so the open path is unchanged.
+def test_register_agent_fetches_nonce_when_invite_absent(tmp_path):
+    # LE-2: public WASM / invite-less path must round-trip GET /agent-nonce and
+    # present the server-issued nonce (never forge Origin headers).
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
     client = NodeAgentClient("https://edge.example.com", StubClassifier(), keys, jl)
-    http = _CapturingHttp()
+    http = _CapturingHttp(nonce="nonce-abc")
 
     client.register_agent(http=http)
 
     assert "invite_token" not in http.sent_json
+    assert http.sent_json["agent_nonce"] == "nonce-abc"
+    assert any(u.endswith("/v1/wu/agent-nonce") for u in http.gets)
 
 
 # --- _ship_logs tests (Phase 1) ---

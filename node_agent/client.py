@@ -326,16 +326,29 @@ class NodeAgentClient:
 
         A production core gates registration behind an operator-minted invite
         token (LUSTRO node N3): pass it here (the CLI reads
-        LUSTRO_NODE_INVITE_TOKEN). A dev/local core leaves registration open,
-        so an empty token is fine and simply omitted from the request.
+        LUSTRO_NODE_INVITE_TOKEN). Public browser WASM volunteers have no
+        invite; they round-trip ``GET /v1/wu/agent-nonce`` and present the
+        server-issued one-time ``agent_nonce`` instead (LE-2). A dev/local
+        core leaves registration open — a nonce is still harmless there.
         """
         url = self._egress.check(f"{self._edge}/v1/wu/register-agent")
         body = {"agent_pubkey": self._keys.public_key_raw_b64()}
-        if invite_token:
-            body["invite_token"] = invite_token
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:
+            if invite_token:
+                body["invite_token"] = invite_token
+            else:
+                # LE-2: forgeable Origin headers are gone; the public WASM path
+                # must present a nonce the core minted. Docker agents with an
+                # invite skip this branch.
+                nonce_url = self._egress.check(f"{self._edge}/v1/wu/agent-nonce")
+                nonce_resp = client.get(nonce_url)
+                nonce_resp.raise_for_status()
+                nonce = nonce_resp.json().get("nonce", "")
+                if not nonce:
+                    raise RuntimeError("agent-nonce response missing nonce")
+                body["agent_nonce"] = nonce
             resp = client.post(url, json=body)
             resp.raise_for_status()
         finally:
