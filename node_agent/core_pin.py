@@ -18,9 +18,6 @@ here it is a config constant the volunteer can audit.
 import base64
 import os
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
 # Identifier of the core key this agent build trusts. A WU declaring any other
 # key id is rejected.
 PINNED_CORE_KEY_ID = "lustro-core-key-v1"
@@ -77,7 +74,12 @@ class CorePinError(Exception):
     """Raised when a work unit fails core key-pinning / signature checks."""
 
 
-def _load_pinned_public_key(raw_b64: str) -> Ed25519PublicKey:
+def _load_pinned_public_key(raw_b64: str):
+    # Lazy import: cryptography is native and unavailable under Pyodide. The WASM
+    # node never calls this (it uses node_agent.crypto.pure_verify_wu_signature),
+    # so the module must import without pulling cryptography in.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
     if not raw_b64:
         raise CorePinError("no pinned core public key configured (fail-closed)")
     try:
@@ -113,5 +115,5 @@ def verify_wu_signature(
     pub = _load_pinned_public_key(raw_b64)
     try:
         pub.verify(core_sig, wu_bytes)
-    except InvalidSignature as e:
+    except Exception as e:
         raise CorePinError("core signature invalid") from e

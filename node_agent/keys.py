@@ -6,20 +6,21 @@ public function and NEVER transmitted. Only the public key is exposed (and only
 the public key is ever sent to the edge, as the agent's identity).
 """
 
+from __future__ import annotations
+
 import base64
 import os
 from pathlib import Path
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
-
 DEFAULT_KEY_PATH = Path.home() / ".lustro-node-agent" / "agent_ed25519.key"
 
 
-def _load_private(path: Path) -> Ed25519PrivateKey:
+def _load_private(path: Path):
+    # Lazy import: cryptography is native and unavailable under Pyodide. The WASM
+    # node never instantiates AgentKeys (it uses PureKeyring), so the module must
+    # import without pulling cryptography in.
+    from cryptography.hazmat.primitives import serialization
+
     raw = path.read_bytes()
     return serialization.load_pem_private_key(raw, password=None)
 
@@ -33,6 +34,9 @@ def ensure_keypair(path: Path | str = DEFAULT_KEY_PATH) -> "AgentKeys":
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(p.parent, 0o700)
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         priv = Ed25519PrivateKey.generate()
         pem = priv.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -71,6 +75,8 @@ class AgentKeys:
         return self.__private.public_key()
 
     def public_key_pem(self) -> bytes:
+        from cryptography.hazmat.primitives import serialization
+
         return self.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
