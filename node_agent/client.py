@@ -18,13 +18,21 @@ Every step is recorded to the JobLog. All network calls go through the
 `EgressGuard`, so only the edge is reachable.
 """
 
+from __future__ import annotations
+
 import base64
 import binascii
 import json
 import os
 from pathlib import Path
 
-import httpx
+try:
+    import httpx
+
+    _HTTPError: type[BaseException] = httpx.HTTPError
+except ModuleNotFoundError:  # WASM/Pyodide: FetchBackend is always supplied
+    httpx = None  # type: ignore[assignment]
+    _HTTPError = OSError
 
 from node_agent.classifier import Classifier
 from node_agent.core_pin import CorePinError, verify_wu_signature
@@ -121,7 +129,7 @@ class NodeAgentClient:
                 headers={"Authorization": f"Bearer {self._participant_token}"},
             )
             response.raise_for_status()
-        except (httpx.HTTPError, OSError) as exc:
+        except (_HTTPError, OSError) as exc:
             self._joblog.append(
                 {
                     "event": "activity_sync_failed",
@@ -453,7 +461,7 @@ class NodeAgentClient:
                     {"event": "ship_logs_failed", "status": resp.status_code}
                 )
                 return
-        except httpx.HTTPError:
+        except _HTTPError:
             # Transport error: keep the cursor so the batch is retried.
             self._joblog.append({"event": "ship_logs_failed", "error": "transport"})
             return
