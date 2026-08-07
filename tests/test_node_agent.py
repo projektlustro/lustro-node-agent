@@ -343,7 +343,10 @@ def _signed_wu(priv, wu):
 
 
 class _StreamCtx:
-    """Minimal stand-in for the httpx.Client.stream() context manager."""
+    """Minimal stand-in for the httpx.Client.stream() context manager.
+    
+    Security: Now implements the _Response protocol for proper validation.
+    """
 
     def __init__(self, status_code, body_bytes):
         self.status_code = status_code
@@ -355,8 +358,29 @@ class _StreamCtx:
     def __exit__(self, *exc):
         return False
 
-    def iter_bytes(self):
-        yield self._body
+    def iter_bytes(self, chunk_size=None):
+        """Yield body in chunks. Accepts chunk_size parameter for compatibility with httpx."""
+        if chunk_size is None:
+            yield self._body
+        else:
+            # Split body into chunks of chunk_size
+            for i in range(0, len(self._body), chunk_size):
+                yield self._body[i:i + chunk_size]
+    
+    def json(self):
+        """Parse body as JSON for _Response protocol compatibility."""
+        if not self._body:
+            return None
+        return json.loads(self._body.decode("utf-8"))
+    
+    def raise_for_status(self):
+        """Raise exception for non-2xx status codes."""
+        if self.status_code >= 400:
+            raise httpx.HTTPError(f"HTTP {self.status_code}")
+    
+    def close(self):
+        """Close the response."""
+        pass
 
 
 class _FakeHttp:
@@ -381,16 +405,22 @@ class _FakeHttp:
 
     def post(self, url, json=None):
         self.posts.append((url, json))
+        return _FakePostResponse()
+    
+    def close(self):
+        pass
 
-        class _R:
-            status_code = 200
 
-            @staticmethod
-            def raise_for_status():
-                pass
-
-        return _R()
-
+class _FakePostResponse:
+    """Simulates httpx response for POST requests."""
+    status_code = 200
+    
+    def json(self):
+        return {}
+    
+    def raise_for_status(self):
+        pass
+    
     def close(self):
         pass
 
@@ -402,10 +432,13 @@ class _FakeFetchResponse:
         self._text = text
 
     def json(self):
+        if not self._text:
+            return None
         return json.loads(self._text)
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise httpx.HTTPError(f"HTTP {self.status_code}")
 
     def close(self):
         pass
@@ -787,15 +820,27 @@ def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def iter_bytes(self):
+        def iter_bytes(self, chunk_size=None):
             # Stream real bytes over the cap, in chunks, with NO
             # Content-Length declared anywhere — this is exactly the
             # chunked-transfer bypass that a naive header-only check misses.
-            chunk = b"a" * 65536
+            # Use provided chunk_size or default to 65536
+            size = chunk_size if chunk_size is not None else 65536
+            chunk = b"a" * size
             sent = 0
             while sent <= MAX_WU_RESPONSE_BYTES:
                 sent += len(chunk)
                 yield chunk
+        
+        def json(self):
+            # Not used in streaming tests
+            return {}
+        
+        def raise_for_status(self):
+            pass
+        
+        def close(self):
+            pass
 
     class _HugeHttp:
         def get(self, url):

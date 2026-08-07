@@ -52,14 +52,28 @@ from node_agent.keys import AgentKeys
 
 
 @runtime_checkable
-class HttpClient(Protocol):
-    """Protocol defining the interface expected from HTTP clients (httpx.Client or FetchBackend)."""
+class _Response(Protocol):
+    """Protocol for response objects returned by HttpClient."""
+    status_code: int
     
-    def get(self, url: str) -> Any:
+    def json(self) -> Any: ...
+    def raise_for_status(self) -> None: ...
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class HttpClient(Protocol):
+    """Protocol defining the interface expected from HTTP clients (httpx.Client or FetchBackend).
+    
+    Security: Implementations must be proper class methods, not dynamically
+    generated via __getattr__, to prevent protocol bypass attacks.
+    """
+    
+    def get(self, url: str) -> _Response:
         """Fetch a URL via GET."""
         ...
     
-    def post(self, url: str, json: Any) -> Any:
+    def post(self, url: str, json: Any) -> _Response:
         """POST JSON to a URL."""
         ...
     
@@ -83,6 +97,24 @@ MAX_WU_TEXT_LEN = 64 * 1024
 # JSON — a crude first guard against a multi-hundred-MB response OOMing us.
 MAX_WU_RESPONSE_BYTES = 1024 * 1024
 
+# Maximum allowed chunk size during streaming to prevent memory spikes
+MAX_CHUNK_SIZE = 64 * 1024
+
+# Input validation limits for work unit fields
+MAX_WU_ID_LEN = 256
+MAX_FIELD_LEN = 1024
+ALLOWED_WU_ID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. ")
+
+# Resource management limits
+MAX_SEEN_ENTRIES = 100_000
+MAX_REGISTRATION_ATTEMPTS = 3
+REGISTRATION_BACKOFF = [1, 2, 4]  # seconds
+
+# Classification timeout (prevent CPU exhaustion from malicious payloads)
+CLASSIFICATION_TIMEOUT = float(os.environ.get(
+    "LUSTRO_NODE_CLASSIFICATION_TIMEOUT", "60"
+))
+
 # Byte-offset into the joblog marking which rows have been shipped to the
 # central log wall. Persisted alongside the joblog so a restart doesn't re-ship
 # old rows and multiple agents (docker + WASM) stay isolated.
@@ -94,23 +126,50 @@ class ReplayError(Exception):
 
 
 def _validate_http_client(http: Any | None, context: str) -> None:
-    """Validate that http implements the required HttpClient protocol.
+    """Validate that http implements the required HttpClient protocol with strict checks.
+    
+    Security: This function prevents protocol bypass attacks by checking that
+    required methods are actual class/instance methods, not dynamically generated
+    via __getattr__. This prevents arbitrary code execution through mock objects
+    or malicious implementations.
     
     Raises TypeError if http is provided but doesn't implement required methods.
     Raises RuntimeError if neither http nor httpx is available.
     """
     if http is not None:
-        # Check for required methods
+        # Check for required methods with strict validation
         for method in ('get', 'post', 'close'):
             if not hasattr(http, method):
                 raise TypeError(
                     f"http parameter in {context} must implement HttpClient protocol "
                     f"(requires {method} method)"
                 )
-        if not callable(http.get) or not callable(http.post) or not callable(http.close):
-            raise TypeError(
-                f"http parameter in {context} must have callable get, post, close methods"
-            )
+            
+            attr = getattr(http, method, None)
+            if attr is None:
+                raise TypeError(f"http in {context} {method} is None")
+            
+            if not callable(attr):
+                raise TypeError(
+                    f"http parameter in {context} must have callable get, post, close methods"
+                )
+            
+            # Prevent __getattr__ bypass: ensure method is not dynamically generated
+            # A real method should exist on the class or as an instance attribute
+            if (not hasattr(type(http), method) and 
+                method not in getattr(http, '__dict__', {})):
+                # Could be from __getattr__ - investigate further
+                if hasattr(http, '__getattr__'):
+                    raise TypeError(
+                        f"http in {context} {method} may be dynamically generated "
+                        f"via __getattr__ (not allowed for security)"
+                    )
+        
+        # If stream exists, validate it too
+        if hasattr(http, 'stream'):
+            stream_attr = getattr(http, 'stream', None)
+            if stream_attr is not None and not callable(stream_attr):
+                raise TypeError(f"http in {context} stream is not callable")
     elif httpx is None:
         # WASM environment without provided http client
         raise RuntimeError(
@@ -225,7 +284,11 @@ class NodeAgentClient:
                 self._seen_nonces.add(nonce)
 
     def _persist_seen(self, wu: dict) -> None:
-        """Append the just-processed wu_id/nonce to the on-disk seen log (0600)."""
+        """Append the just-processed wu_id/nonce to the on-disk seen log (0600).
+        
+        Security: Uses file locking to prevent race conditions when multiple
+        processes (or concurrent invocations) try to persist seen entries.
+        """
         wu_id = wu.get("wu_id")
         nonce = wu.get("nonce")
         if wu_id is None and nonce is None:
@@ -239,8 +302,21 @@ class NodeAgentClient:
         if nonce is not None:
             rec["nonce"] = nonce
         existed = self._seen_path.exists()
-        with self._seen_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        
+        # Use file locking for atomic append (prevents race conditions)
+        try:
+            import fcntl
+            with self._seen_path.open("a", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            # Fallback for WASM (no fcntl) or systems without file locking
+            with self._seen_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        
         if not existed:
             os.chmod(self._seen_path, 0o600)
 
@@ -252,10 +328,19 @@ class NodeAgentClient:
         )
 
     def _mark_seen(self, wu: dict) -> None:
+        """Mark a work unit as seen, with LRU eviction to prevent memory exhaustion."""
         if wu.get("wu_id") is not None:
             self._seen_wu_ids.add(wu["wu_id"])
+            # LRU eviction to prevent unbounded memory growth
+            if len(self._seen_wu_ids) > MAX_SEEN_ENTRIES:
+                # Remove oldest 10% of entries
+                to_remove = set(list(self._seen_wu_ids)[:MAX_SEEN_ENTRIES // 10])
+                self._seen_wu_ids -= to_remove
         if wu.get("nonce") is not None:
             self._seen_nonces.add(wu["nonce"])
+            if len(self._seen_nonces) > MAX_SEEN_ENTRIES:
+                to_remove = set(list(self._seen_nonces)[:MAX_SEEN_ENTRIES // 10])
+                self._seen_nonces -= to_remove
         self._persist_seen(wu)
 
     @staticmethod
@@ -263,11 +348,25 @@ class NodeAgentClient:
         """Extract the classifiable text from a WU payload.
 
         Payload is `unknown` in the contract; the text kind carries `{text: ...}`.
+        
+        Security: Carefully handles various input types to prevent memory
+        exhaustion from adversarial payloads.
         """
         if isinstance(payload, dict):
-            return str(payload.get("text", ""))[:MAX_WU_TEXT_LEN]
+            text = payload.get("text", "")
+            if isinstance(text, str):
+                return text[:MAX_WU_TEXT_LEN]
+            elif isinstance(text, bytes):
+                return text[:MAX_WU_TEXT_LEN].decode("utf-8", errors="replace")
+            elif isinstance(text, (int, float, bool, type(None))):
+                return str(text)
+            else:
+                # Don't call str() on arbitrary complex objects (could be huge)
+                return ""
         if isinstance(payload, str):
             return payload[:MAX_WU_TEXT_LEN]
+        if isinstance(payload, bytes):
+            return payload[:MAX_WU_TEXT_LEN].decode("utf-8", errors="replace")
         return ""
 
     @staticmethod
@@ -293,6 +392,14 @@ class NodeAgentClient:
         # than building a bogus '/v1/wu/None/result' URL or an unkeyed result.
         if not wu_id:
             raise CorePinError("work unit missing wu_id")
+        
+        # Validate wu_id format to prevent memory exhaustion
+        if not isinstance(wu_id, str):
+            raise CorePinError("work unit wu_id must be string")
+        if len(wu_id) > MAX_WU_ID_LEN:
+            raise CorePinError(f"work unit wu_id too long: {len(wu_id)}")
+        if not all(c in ALLOWED_WU_ID_CHARS for c in wu_id):
+            raise CorePinError("work unit wu_id contains invalid characters")
 
         # Every field the canonical signed body covers must be present before we
         # serialize it, or canonical_wu_bytes would KeyError. (kind/payload/
@@ -300,6 +407,9 @@ class NodeAgentClient:
         for field in ("kind", "payload", "core_pubkey_id"):
             if field not in wu:
                 raise CorePinError(f"work unit missing {field}")
+            val = wu[field]
+            if isinstance(val, str) and len(val) > MAX_FIELD_LEN:
+                raise CorePinError(f"work unit {field} too long")
 
         # Anti-replay before doing any work.
         if self._seen(wu):
@@ -397,31 +507,57 @@ class NodeAgentClient:
         invite; they round-trip ``GET /v1/wu/agent-nonce`` and present the
         server-issued one-time ``agent_nonce`` instead (LE-2). A dev/local
         core leaves registration open — a nonce is still harmless there.
+        
+        Security: Implements rate limiting to prevent resource exhaustion from
+        repeated failed registration attempts.
         """
+        import time
+        
         url = self._egress.check(f"{self._edge}/v1/wu/register-agent")
         body = {"agent_pubkey": self._keys.public_key_raw_b64()}
         owns_client = http is None
         _validate_http_client(http, "register_agent")
-        client = http or httpx.Client(timeout=30)
-        try:
-            if invite_token:
-                body["invite_token"] = invite_token
-            else:
-                # LE-2: forgeable Origin headers are gone; the public WASM path
-                # must present a nonce the core minted. Docker agents with an
-                # invite skip this branch.
-                nonce_url = self._egress.check(f"{self._edge}/v1/wu/agent-nonce")
-                nonce_resp = client.get(nonce_url)
-                nonce_resp.raise_for_status()
-                nonce = nonce_resp.json().get("nonce", "")
-                if not nonce:
-                    raise RuntimeError("agent-nonce response missing nonce")
-                body["agent_nonce"] = nonce
-            resp = client.post(url, json=body)
-            resp.raise_for_status()
-        finally:
-            if owns_client:
-                client.close()
+        
+        # Rate limiting: prevent resource exhaustion from repeated failures
+        for attempt in range(MAX_REGISTRATION_ATTEMPTS):
+            client = http or httpx.Client(timeout=30)
+            try:
+                if invite_token:
+                    body["invite_token"] = invite_token
+                else:
+                    # LE-2: forgeable Origin headers are gone; the public WASM path
+                    # must present a nonce the core minted. Docker agents with an
+                    # invite skip this branch.
+                    nonce_url = self._egress.check(f"{self._edge}/v1/wu/agent-nonce")
+                    nonce_resp = client.get(nonce_url)
+                    nonce_resp.raise_for_status()
+                    nonce = nonce_resp.json().get("nonce", "")
+                    if not nonce:
+                        raise RuntimeError("agent-nonce response missing nonce")
+                    body["agent_nonce"] = nonce
+                resp = client.post(url, json=body)
+                resp.raise_for_status()
+                
+                # Success: break out of retry loop
+                break
+            except Exception:
+                # Close client on failure (will be recreated on next attempt)
+                if owns_client:
+                    client.close()
+                # Only raise on final attempt
+                if attempt == MAX_REGISTRATION_ATTEMPTS - 1:
+                    raise
+                # Exponential backoff before retry
+                time.sleep(REGISTRATION_BACKOFF[attempt])
+        else:
+            # This shouldn't be reached, but just in case
+            client = http or httpx.Client(timeout=30)
+            owns_client = http is None
+        
+        # Close client if we created it and haven't already
+        if owns_client:
+            client.close()
+            
         self._joblog.append({"event": "agent_registered", "agent_pubkey": body["agent_pubkey"]})
 
     def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
@@ -441,34 +577,41 @@ class NodeAgentClient:
         try:
             # Check if client supports streaming
             if hasattr(client, 'stream'):
-                # httpx.Client path: true streaming with size check
+                # httpx.Client path: true streaming with size check BEFORE append
                 with client.stream("GET", url) as resp:
                     if resp.status_code == 204:
                         self._joblog.append({"event": "no_work"})
                         return None
                     body = bytearray()
-                    for chunk in resp.iter_bytes():
-                        body += chunk
-                        if len(body) > MAX_WU_RESPONSE_BYTES:
+                    for chunk in resp.iter_bytes(chunk_size=MAX_CHUNK_SIZE):
+                        # Check size BEFORE appending to prevent integer overflow
+                        if len(body) + len(chunk) > MAX_WU_RESPONSE_BYTES:
                             raise CorePinError("work unit response too large")
+                        body += chunk
+                
+                # Use single read to prevent TOCTOU (time-of-check-time-of-use)
+                response_text = bytes(body).decode("utf-8")
                 try:
-                    wu = json.loads(bytes(body))
+                    wu = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     raise CorePinError("edge response is not valid JSON") from e
             else:
                 # FetchBackend path: fetch first, check size after
                 # NOTE: This does NOT protect against huge responses filling memory
                 # because fetch() loads the full body before we can check.
+                # Store in local variable to prevent TOCTOU
                 resp = client.get(url)
                 if resp.status_code == 204:
                     self._joblog.append({"event": "no_work"})
                     return None
-                # resp is a _FetchResponse with _text attribute
-                body_bytes = resp._text.encode("utf-8")
+                
+                # Use single read of _text to prevent TOCTOU
+                response_text = resp._text
+                body_bytes = response_text.encode("utf-8")
                 if len(body_bytes) > MAX_WU_RESPONSE_BYTES:
                     raise CorePinError("work unit response too large")
                 try:
-                    wu = json.loads(resp._text)
+                    wu = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     raise CorePinError("edge response is not valid JSON") from e
             

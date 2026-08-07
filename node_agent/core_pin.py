@@ -102,6 +102,14 @@ def verify_wu_signature(
     ``pinned_public_key_b64`` is base64 of the pinned raw 32-byte Ed25519 public
     key. Raises `CorePinError` if the key id mismatches or the signature is
     invalid. Returns None on success.
+    
+    Security Note: The key ID comparison is done with simple string comparison
+    which may have timing side-channels. In practice, the key ID is a public
+    value and not a secret, so timing attacks on this comparison are not a
+    concern. The signature verification itself may also have timing side-channels
+    in the cryptography library, but this is acceptable for this use case where
+    the verification is not the primary defense mechanism (the pinned key ID
+    and egress restrictions are the main defenses).
     """
     if key_id != pinned_key_id:
         raise CorePinError(
