@@ -25,11 +25,67 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from node_agent import core_pin
 from node_agent.classifier import StubClassifier
-from node_agent.client import NodeAgentClient, ReplayError, canonical_wu_bytes
+from node_agent.client import NodeAgentClient, ReplayError, canonical_wu_bytes, _validate_http_client
 from node_agent.core_pin import CorePinError, verify_wu_signature
 from node_agent.egress import EgressGuard, EgressViolation
 from node_agent.joblog import JobLog
 from node_agent.keys import ensure_keypair
+
+
+# --- HttpClient validation tests ---
+
+
+def test_validate_http_client_with_valid_httpx_client():
+    """Test that validation passes with a real httpx.Client."""
+    import httpx
+    client = httpx.Client(timeout=30)
+    try:
+        # Should not raise
+        _validate_http_client(client, "test")
+    finally:
+        client.close()
+
+
+def test_validate_http_client_with_valid_fake_backend():
+    """Test that validation passes with _FakeHttp (has all required methods)."""
+    http = _FakeHttp()
+    # Should not raise
+    _validate_http_client(http, "test")
+
+
+def test_validate_http_client_with_valid_fake_fetch_backend():
+    """Test that validation passes with _FakeFetchBackend."""
+    http = _FakeFetchBackend()
+    # Should not raise
+    _validate_http_client(http, "test")
+
+
+def test_validate_http_client_with_none_and_httpx_available():
+    """Test that validation passes with http=None when httpx is available."""
+    # Should not raise when httpx is available
+    _validate_http_client(None, "test")
+
+
+def test_validate_http_client_with_partial_implementation():
+    """Test that validation rejects objects missing required methods."""
+    class PartialClient:
+        def get(self, url):
+            pass
+        # Missing post and close
+    
+    with pytest.raises(TypeError, match="must implement HttpClient protocol"):
+        _validate_http_client(PartialClient(), "test")
+
+
+def test_validate_http_client_with_non_callable_methods():
+    """Test that validation rejects objects with non-callable methods."""
+    class BadClient:
+        get = "not callable"
+        post = "not callable"
+        close = "not callable"
+    
+    with pytest.raises(TypeError, match="must have callable get, post, close methods"):
+        _validate_http_client(BadClient(), "test")
 
 
 # --- keys: generated locally, private key never returned by a public function ---
@@ -310,6 +366,13 @@ class _FakeHttp:
         self._wu = wu
 
     def stream(self, method, url):
+        self.gets.append(url)
+        wu = self._wu
+        if wu is None:
+            return _StreamCtx(204, b"")
+        return _StreamCtx(200, json.dumps(wu).encode())
+
+    def get(self, url):
         self.gets.append(url)
         wu = self._wu
         if wu is None:
@@ -735,6 +798,12 @@ def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
                 yield chunk
 
     class _HugeHttp:
+        def get(self, url):
+            raise RuntimeError("_HugeHttp should use stream(), not get()")
+        
+        def post(self, url, json=None):
+            raise RuntimeError("_HugeHttp should use stream(), not post()")
+
         def stream(self, method, url):
             return _HugeStreamCtx()
 
@@ -861,6 +930,9 @@ def test_wu_not_marked_seen_when_post_fails(tmp_path, monkeypatch):
         def __init__(self):
             self.calls = 0
 
+        def get(self, url):
+            raise RuntimeError("edge 500 / network blip")
+        
         def post(self, url, json=None):
             self.calls += 1
             raise RuntimeError("edge 500 / network blip")
@@ -891,6 +963,10 @@ def test_non_2xx_result_leaves_wu_unseen(tmp_path, monkeypatch):
     wu = _signed_wu(priv, {"wu_id": "wu-500", "kind": "text", "payload": {"text": "hi"}})
 
     class _Http500:
+        def get(self, url):
+            req = httpx.Request("GET", url)
+            return httpx.Response(500, request=req)
+        
         def post(self, url, json=None):
             req = httpx.Request("POST", url)
             return httpx.Response(500, request=req)
@@ -925,6 +1001,9 @@ def test_participant_token_syncs_accepted_work_to_dashboard(tmp_path, monkeypatc
         def __init__(self):
             self.posts = []
 
+        def get(self, url):
+            raise RuntimeError("_ActivityHttp: get not implemented")
+        
         def post(self, url, json=None, headers=None):
             self.posts.append((url, json, headers))
 
@@ -977,6 +1056,9 @@ def test_activity_sync_failure_does_not_retry_consumed_work_unit(
         def __init__(self):
             self.calls = 0
 
+        def get(self, url):
+            raise RuntimeError("_ActivityFails: get not implemented")
+        
         def post(self, url, json=None, headers=None):
             self.calls += 1
             request = httpx.Request("POST", url)
@@ -1162,6 +1244,9 @@ class _ShipHttpCapturing:
         self.posts = []
         self.next_status = 202
 
+    def get(self, url):
+        raise RuntimeError("_ShipHttpCapturing: get not implemented")
+
     def post(self, url, json=None):
         self.posts.append((url, json))
 
@@ -1180,6 +1265,9 @@ class _ShipHttpCapturing:
 
 class _ShipHttp4xx:
     """Simulates a 4xx rejection from the edge."""
+    def get(self, url):
+        raise RuntimeError("_ShipHttp4xx: get not implemented")
+    
     def post(self, url, json=None):
         req = httpx.Request("POST", url)
         return httpx.Response(403, request=req)
@@ -1190,6 +1278,9 @@ class _ShipHttp4xx:
 
 class _ShipHttpTransportError:
     """Simulates a transport error (connection refused)."""
+    def get(self, url):
+        raise httpx.ConnectError("Connection refused")
+    
     def post(self, url, json=None):
         raise httpx.ConnectError("Connection refused")
 

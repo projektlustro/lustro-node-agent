@@ -16,6 +16,15 @@ Flow:
 
 Every step is recorded to the JobLog. All network calls go through the
 `EgressGuard`, so only the edge is reachable.
+
+HTTP Client Requirements:
+  In WASM (Pyodide) environments, the `httpx` module is not available. Callers
+  MUST provide an `http` parameter that implements the HttpClient protocol
+  (get, post, close methods). In CLI/Docker environments, httpx is available
+  and `http` is optional (defaults to a new httpx.Client instance).
+
+  The HttpClient protocol is defined in this module and validated at runtime
+  to prevent type confusion and ensure required methods are present.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ import binascii
 import json
 import os
 from pathlib import Path
+from typing import Protocol, runtime_checkable, Any
 
 try:
     import httpx
@@ -39,6 +49,28 @@ from node_agent.core_pin import CorePinError, verify_wu_signature
 from node_agent.egress import EgressGuard
 from node_agent.joblog import JobLog
 from node_agent.keys import AgentKeys
+
+
+@runtime_checkable
+class HttpClient(Protocol):
+    """Protocol defining the interface expected from HTTP clients (httpx.Client or FetchBackend)."""
+    
+    def get(self, url: str) -> Any:
+        """Fetch a URL via GET."""
+        ...
+    
+    def post(self, url: str, json: Any) -> Any:
+        """POST JSON to a URL."""
+        ...
+    
+    def close(self) -> None:
+        """Clean up resources."""
+        ...
+    
+    # Optional: streaming support (httpx.Client has this, FetchBackend does not)
+    def stream(self, method: str, url: str) -> Any:
+        """Open a streaming connection."""
+        ...
 
 DEFAULT_SEEN_PATH = Path.home() / ".lustro-node-agent" / "seen.jsonl"
 
@@ -59,6 +91,32 @@ DEFAULT_SHIPPED_FILENAME = "shipped.offset"
 
 class ReplayError(Exception):
     """Raised when a work unit wu_id / nonce has already been processed."""
+
+
+def _validate_http_client(http: Any | None, context: str) -> None:
+    """Validate that http implements the required HttpClient protocol.
+    
+    Raises TypeError if http is provided but doesn't implement required methods.
+    Raises RuntimeError if neither http nor httpx is available.
+    """
+    if http is not None:
+        # Check for required methods
+        for method in ('get', 'post', 'close'):
+            if not hasattr(http, method):
+                raise TypeError(
+                    f"http parameter in {context} must implement HttpClient protocol "
+                    f"(requires {method} method)"
+                )
+        if not callable(http.get) or not callable(http.post) or not callable(http.close):
+            raise TypeError(
+                f"http parameter in {context} must have callable get, post, close methods"
+            )
+    elif httpx is None:
+        # WASM environment without provided http client
+        raise RuntimeError(
+            f"In {context}: httpx not available in this environment; "
+            "caller must provide http parameter (FetchBackend instance)"
+        )
 
 
 def canonical_wu_bytes(wu: dict) -> bytes:
@@ -293,6 +351,7 @@ class NodeAgentClient:
 
         url = self._egress.check(f"{self._edge}/v1/wu/{wu_id}/result")
         owns_client = http is None
+        _validate_http_client(http, "process_wu")
         client = http or httpx.Client(timeout=30)
         try:
             resp = client.post(url, json=body)
@@ -342,6 +401,7 @@ class NodeAgentClient:
         url = self._egress.check(f"{self._edge}/v1/wu/register-agent")
         body = {"agent_pubkey": self._keys.public_key_raw_b64()}
         owns_client = http is None
+        _validate_http_client(http, "register_agent")
         client = http or httpx.Client(timeout=30)
         try:
             if invite_token:
@@ -376,6 +436,7 @@ class NodeAgentClient:
         """
         url = self._egress.check(f"{self._edge}/v1/wu")
         owns_client = http is None
+        _validate_http_client(http, "pull_and_process")
         client = http or httpx.Client(timeout=30)
         try:
             # Check if client supports streaming
@@ -473,6 +534,7 @@ class NodeAgentClient:
 
         url = self._egress.check(f"{self._edge}/v1/wu/node-logs")
         owns_client = http is None
+        _validate_http_client(http, "_ship_logs")
         client = http or httpx.Client(timeout=30)
         try:
             resp = client.post(url, json=body)
