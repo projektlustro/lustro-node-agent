@@ -332,6 +332,44 @@ class _FakeHttp:
         pass
 
 
+class _FakeFetchResponse:
+    """Simulates transport._FetchResponse for testing FetchBackend path."""
+    def __init__(self, status_code, text):
+        self.status_code = status_code
+        self._text = text
+
+    def json(self):
+        return json.loads(self._text)
+
+    def raise_for_status(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakeFetchBackend:
+    """Simulates transport.FetchBackend for testing the non-streaming path."""
+    def __init__(self, wu=None):
+        self.posts = []
+        self.gets = []
+        self._wu = wu
+
+    def get(self, url):
+        self.gets.append(url)
+        wu = self._wu
+        if wu is None:
+            return _FakeFetchResponse(204, "")
+        return _FakeFetchResponse(200, json.dumps(wu))
+
+    def post(self, url, json=None):
+        self.posts.append((url, json))
+        return _FakeFetchResponse(200, "{}")
+
+    def close(self):
+        pass
+
+
 def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
     priv, pem = _make_core()
     monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
@@ -386,6 +424,108 @@ def test_pull_returns_none_when_no_work(tmp_path, monkeypatch):
     http = _FakeHttp(wu=None)  # 204 No Content
     assert client.pull_and_process(http=http) is None
     assert http.posts == []
+
+
+def test_pull_with_fetch_backend_full_loop(tmp_path, monkeypatch):
+    """Test that pull_and_process works with FetchBackend (WASM path)."""
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    jl = JobLog(tmp_path / "joblog.jsonl")
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier("benign", 0.1), keys, jl
+    )
+
+    wu = _signed_wu(priv, {
+        "wu_id": "wu-fetch-1", "kind": "text", "payload": {"text": "hello"},
+    })
+    http = _FakeFetchBackend(wu=wu)
+
+    out = client.pull_and_process(http=http)
+
+    assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig", "text_preview"}
+    assert out["labels"] == ["benign"]
+    assert out["score"] == 0.1
+    assert out["agent_pubkey"] == keys.public_key_raw_b64()
+    assert http.gets == ["https://edge.example.com/v1/wu"]
+    assert http.posts[0][0] == "https://edge.example.com/v1/wu/wu-fetch-1/result"
+
+
+def test_pull_with_fetch_backend_no_work(tmp_path, monkeypatch):
+    """Test that pull_and_process returns None with FetchBackend when no work (204)."""
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "joblog.jsonl"),
+    )
+    http = _FakeFetchBackend(wu=None)  # 204 No Content
+    assert client.pull_and_process(http=http) is None
+    assert http.posts == []
+
+
+def test_fetchbackend_oversized_response_is_rejected(tmp_path, monkeypatch):
+    """Test that FetchBackend path rejects oversized responses."""
+    from node_agent.client import MAX_WU_RESPONSE_BYTES, CorePinError
+    
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "joblog.jsonl"),
+    )
+    
+    huge_text = "a" * (MAX_WU_RESPONSE_BYTES + 1)
+    http = _FakeFetchBackend(wu=None)
+    http.get = lambda url: _FakeFetchResponse(200, huge_text)
+    
+    with pytest.raises(CorePinError, match="work unit response too large"):
+        client.pull_and_process(http=http)
+
+
+def test_fetchbackend_exactly_max_size_response(tmp_path, monkeypatch):
+    """Test that response exactly at MAX_WU_RESPONSE_BYTES is accepted (size-wise)."""
+    from node_agent.client import MAX_WU_RESPONSE_BYTES
+    
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "joblog.jsonl"),
+    )
+    
+    exact_text = "a" * MAX_WU_RESPONSE_BYTES
+    http = _FakeFetchBackend(wu=None)
+    http.get = lambda url: _FakeFetchResponse(200, exact_text)
+    
+    with pytest.raises(CorePinError, match="not valid JSON"):
+        client.pull_and_process(http=http)
+
+
+def test_fetchbackend_unicode_byte_counting(tmp_path, monkeypatch):
+    """Test that FetchBackend correctly counts UTF-8 bytes, not characters."""
+    from node_agent.client import MAX_WU_RESPONSE_BYTES, CorePinError
+    
+    _, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    client = NodeAgentClient(
+        "https://edge.example.com", StubClassifier(), keys,
+        JobLog(tmp_path / "joblog.jsonl"),
+    )
+    
+    payload = {"wu_id": "test", "kind": "text", "payload": {"text": "a" * (MAX_WU_RESPONSE_BYTES - 50) + "café"}}
+    json_text = json.dumps(payload)
+    assert len(json_text.encode('utf-8')) > MAX_WU_RESPONSE_BYTES, "Test setup needs adjustment"
+    
+    http = _FakeFetchBackend(wu=None)
+    http.get = lambda url: _FakeFetchResponse(200, json_text)
+    
+    with pytest.raises(CorePinError, match="work unit response too large"):
+        client.pull_and_process(http=http)
 
 
 def test_anti_replay_rejects_repeated_wu_id(tmp_path, monkeypatch):

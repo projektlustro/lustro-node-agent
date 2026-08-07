@@ -251,3 +251,15 @@ The test suite covers the trust invariants directly: the private key is never
 returned/transmitted, the core cannot mint the agent key, pinned-key
 verification (good/bad sig + key-id), anti-replay, egress refusal of off-host
 requests, and the end-to-end loop against a mock edge.
+
+## Security Limitations
+
+### Browser WASM Node
+The browser-based WASM node has an inherent limitation: it cannot enforce
+`MAX_WU_RESPONSE_BYTES` at fetch time. The browser's fetch API loads the entire
+response body into memory before the agent can check its size. While the agent
+still rejects work units that exceed the size limit, a hostile edge could
+send an oversized response that exhausts browser memory.
+
+The Docker and source (CLI) agents do NOT have this limitation — they use
+httpx with true streaming and enforce the size limit incrementally.

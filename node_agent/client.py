@@ -365,30 +365,52 @@ class NodeAgentClient:
         self._joblog.append({"event": "agent_registered", "agent_pubkey": body["agent_pubkey"]})
 
     def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
-        """Pull one WU from the edge and process it; None if no work (204)."""
+        """Pull one WU from the edge and process it; None if no work (204).
+        
+        Security note: When http is a FetchBackend (WASM/browser), the browser's
+        fetch API loads the entire response body into memory before we can check
+        its size. The size check still rejects oversized WUs, but cannot prevent
+        memory exhaustion from a hostile edge sending a huge response.
+        The Docker/CLI agents (httpx.Client) use true streaming and enforce the
+        size limit incrementally.
+        """
         url = self._egress.check(f"{self._edge}/v1/wu")
         owns_client = http is None
         client = http or httpx.Client(timeout=30)
         try:
-            # Stream the response and enforce MAX_WU_RESPONSE_BYTES against the
-            # bytes actually received, not the (untrustworthy, optional)
-            # declared Content-Length header. A hostile edge can send a
-            # Transfer-Encoding: chunked body with no Content-Length at all,
-            # which would otherwise skip the size check entirely and let
-            # resp.json() buffer an unbounded body into memory.
-            with client.stream("GET", url) as resp:
+            # Check if client supports streaming
+            if hasattr(client, 'stream'):
+                # httpx.Client path: true streaming with size check
+                with client.stream("GET", url) as resp:
+                    if resp.status_code == 204:
+                        self._joblog.append({"event": "no_work"})
+                        return None
+                    body = bytearray()
+                    for chunk in resp.iter_bytes():
+                        body += chunk
+                        if len(body) > MAX_WU_RESPONSE_BYTES:
+                            raise CorePinError("work unit response too large")
+                try:
+                    wu = json.loads(bytes(body))
+                except json.JSONDecodeError as e:
+                    raise CorePinError("edge response is not valid JSON") from e
+            else:
+                # FetchBackend path: fetch first, check size after
+                # NOTE: This does NOT protect against huge responses filling memory
+                # because fetch() loads the full body before we can check.
+                resp = client.get(url)
                 if resp.status_code == 204:
                     self._joblog.append({"event": "no_work"})
                     return None
-                body = bytearray()
-                for chunk in resp.iter_bytes():
-                    body += chunk
-                    if len(body) > MAX_WU_RESPONSE_BYTES:
-                        raise CorePinError("work unit response too large")
-            try:
-                wu = json.loads(bytes(body))
-            except json.JSONDecodeError as e:
-                raise CorePinError("edge response is not valid JSON") from e
+                # resp is a _FetchResponse with _text attribute
+                body_bytes = resp._text.encode("utf-8")
+                if len(body_bytes) > MAX_WU_RESPONSE_BYTES:
+                    raise CorePinError("work unit response too large")
+                try:
+                    wu = json.loads(resp._text)
+                except json.JSONDecodeError as e:
+                    raise CorePinError("edge response is not valid JSON") from e
+            
             if not isinstance(wu, dict):
                 raise CorePinError("edge returned a non-object work unit")
             return self.process_wu(wu, http=client)
