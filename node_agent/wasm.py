@@ -190,13 +190,34 @@ class _BrowserNode:
         self._on_step(f"shipped   -> {len(stripped_rows)} rows to Loki wall")
 
 
+def _pin_core_key(pinned_key_b64: str | None) -> None:
+    """Seed the pinned core key into the process env before any WU is verified.
+
+    The browser holds the pinned key (baked into the page) but the agent reads
+    it only from ``LUSTRO_NODE_AGENT_PINNED_KEY_B64`` via ``core_pin``. Without
+    this, ``_effective_pinned_key()`` is empty and every core-signed WU is
+    rejected fail-closed. An empty/None key is left untouched so the fail-closed
+    default is preserved (we never fall open to trusting all keys).
+    """
+    if pinned_key_b64:
+        import os
+
+        os.environ["LUSTRO_NODE_AGENT_PINNED_KEY_B64"] = pinned_key_b64
+
+
 def new_node(
     edge: str = DEFAULT_EDGE,
     on_step: Callable[[str], None] | None = None,
+    pinned_key_b64: str | None = None,
 ) -> _BrowserNode:
+    _pin_core_key(pinned_key_b64)
     return _BrowserNode(edge, on_step or (lambda _msg: None), BrowserStore())
 
 
-def run_once(edge: str = DEFAULT_EDGE, on_step: Callable[[str], None] | None = None) -> Any:
+def run_once(
+    edge: str = DEFAULT_EDGE,
+    on_step: Callable[[str], None] | None = None,
+    pinned_key_b64: str | None = None,
+) -> Any:
     """Convenience: build a node and process one work unit (registers if needed)."""
-    return new_node(edge, on_step).run_once()
+    return new_node(edge, on_step, pinned_key_b64).run_once()
