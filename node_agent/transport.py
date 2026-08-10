@@ -267,9 +267,11 @@ def _to_js_object(py_dict: dict) -> Any:
     if not all(isinstance(k, str) for k in py_dict):
         raise TypeError("dict keys must be strings for JS conversion")
     
-    # Validate values are JSON-serializable types
+    # Validate values are JSON-serializable types. JsProxy values (e.g.
+    # AbortController.signal) are already JS objects and pass through to_js.
+    from pyodide.ffi import JsProxy
     for v in py_dict.values():
-        if not isinstance(v, (str, int, float, bool, type(None), list, dict)):
+        if not isinstance(v, (str, int, float, bool, type(None), list, dict, JsProxy)):
             raise TypeError(f"unsupported type for JS conversion: {type(v)}")
 
     return to_js(py_dict, dict_converter=js.Object.fromEntries)

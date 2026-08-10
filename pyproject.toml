@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lustro-node-agent"
+version = "0.1.3"
+description = "Volunteer-run, sandboxed classifier for LUSTRO (CLI + in-browser WASM node)."
+requires-python = ">=3.11"
+license-files = ["LICENSE"]
+# Deliberately empty: the wheel is installed by micropip into Pyodide, where
+# httpx/cryptography are unavailable. The browser node runs on the pure-Python
+# backends (transport.FetchBackend, _ed25519_pure); the CLI installs its own
+# runtime deps from requirements.txt.
+dependencies = []
+
+[project.scripts]
+node-agent = "node_agent.cli:main"
+
+[tool.setuptools]
+packages = ["node_agent"]
