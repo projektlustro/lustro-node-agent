@@ -97,6 +97,16 @@ class _FetchResponse:
             return json.loads(self._text)
         return json.loads(self._body.decode("utf-8"))
 
+    def __enter__(self) -> "_FetchResponse":
+        # client.pull_and_process uses `with client.stream(...) as resp:` —
+        # the httpx response supports the context manager protocol, so this
+        # shim must too.
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        self.close()
+        return False
+
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             error_text = self._text[:200] if self._text else self._body[:200].decode("utf-8", errors="replace")
@@ -112,9 +122,11 @@ class _FetchResponse:
                 pass
         self._reader = None
 
-    def iter_bytes(self) -> Iterator[bytes]:
+    def iter_bytes(self, chunk_size: int = MAX_CHUNK_SIZE) -> Iterator[bytes]:
         """Iterate over response body in chunks for streaming.
-        
+
+        Accepts (and ignores) httpx's ``chunk_size`` kwarg so the shared client
+        loop can call it uniformly on both backends.
         Security: Enforces MAX_WU_RESPONSE_BYTES limit incrementally to prevent
         memory exhaustion. Note: In WASM, the browser's fetch API may still
         buffer the full response before this method is called.
@@ -177,6 +189,10 @@ class FetchBackend:
 
     def _fetch(self, url: str, *, method: str, body: str | None, stream: bool = False) -> _FetchResponse:
         import js
+        # Pyodide 0.27: JS exceptions surface as pyodide.ffi.JsException.
+        # (js.JSError does not exist — evaluating that except clause itself
+        # raises AttributeError and masks the real failure.)
+        from pyodide.ffi import JsException
 
         # Validate request body size
         self._validate_body_size(body)
@@ -200,25 +216,26 @@ class FetchBackend:
         
         try:
             resp = _syncify(js.fetch(url, opts_js))
-            
+
             # Check for redirect (shouldn't happen with redirect: error, but be safe)
             if hasattr(resp, 'redirected') and resp.redirected:
                 raise TransportError(f"redirect not allowed: {url}")
-            
-            if stream and hasattr(resp, 'body'):
-                # Try to use streaming if available
-                try:
-                    reader = _syncify(resp.body.getReader())
-                    return _FetchResponse(status=int(resp.status), text=None, reader=reader)
-                except Exception:
-                    # Fall back to non-streaming
-                    text = _syncify(resp.text())
-                    return _FetchResponse(status=int(resp.status), text=text)
-            else:
-                text = _syncify(resp.text())
-                return _FetchResponse(status=int(resp.status), text=text)
-                
-        except js.JSError as e:
+
+            # NOTE: true body streaming (resp.body.getReader()) is NOT usable
+            # under syncify: getReader() locks the ReadableStream synchronously
+            # in JS, so any later resp.text() fails with "body stream is
+            # locked", and the js._read_chunk helpers the reader path needs are
+            # not defined in the page context. The browser buffers the full
+            # body anyway, so read it as text in one shot; the size limit is
+            # enforced here AND incrementally in _FetchResponse.iter_bytes.
+            text = _syncify(resp.text())
+            if len(text.encode("utf-8")) > MAX_WU_RESPONSE_BYTES:
+                raise TransportError(f"response too large (>{MAX_WU_RESPONSE_BYTES} bytes)")
+            return _FetchResponse(status=int(resp.status), text=text)
+
+        except TransportError:
+            raise
+        except JsException as e:
             raise TransportError(f"fetch {method} {url} failed: {e}") from e
         except Exception as e:  # AbortError or network failure
             raise TransportError(f"fetch {method} {url} failed/aborted: {e}") from e
@@ -230,11 +247,12 @@ class FetchBackend:
         return self._fetch(url, method="POST", body=js_dumps(json))
     
     def stream(self, method: str, url: str) -> _FetchResponse:
-        """Open a streaming connection.
-        
-        Security: Uses streaming fetch to limit memory usage for large responses.
-        Note: The browser's fetch API may still buffer the full response in some
-        cases, but we enforce size limits when reading.
+        """Open a 'streaming' connection.
+
+        Under Pyodide/syncify true ReadableStream streaming is not usable (see
+        _fetch), so this is a buffered fetch behind the httpx-style stream()
+        API; the response still supports the context-manager protocol and
+        iter_bytes with the MAX_WU_RESPONSE_BYTES limit.
         """
         if method.upper() == "GET":
             return self._fetch(url, method=method, body=None, stream=True)
