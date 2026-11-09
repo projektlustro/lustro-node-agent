@@ -120,6 +120,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     keys = ensure_keypair(DEFAULT_KEY_PATH)
     joblog = JobLog(DEFAULT_JOBLOG_PATH)
+    if getattr(args, "enable_scraping", False):
+        os.environ["LUSTRO_NODE_SCRAPING_ENABLED"] = "1"
     # ``--stub`` exists only for the offline protocol test suite.  Production
     # runs are model-only and fail closed when the signed artifact is absent.
     try:
@@ -256,6 +258,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--stub", action="store_true",
         help="use the stub classifier (for tests / smoke runs)"
+    )
+    run_p.add_argument(
+        "--enable-scraping", action="store_true",
+        help="opt in to authenticated direct scraping (separate profile; "
+        "default remains edge-only). Signed manifest + lease rules apply."
     )
     run_p.add_argument(
         "--once", action="store_true",

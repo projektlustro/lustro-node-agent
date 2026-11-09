@@ -29,10 +29,16 @@ def heartbeat(state_dir, lease_id: str, generation: int) -> None:
         raise LeaseLost(f"lease {lease_id} fenced at generation {generation}")
 
 
-def run_once(client, state_dir) -> SimpleNamespace:
-    """Claim at most one work unit, process it, and exit."""
+def run_once(client, state_dir, allow_scraping: bool = False) -> SimpleNamespace:
+    """Claim at most one work unit, process it, and exit.
+
+    Scraping-kind work is refused unless the node explicitly opted in with
+    --enable-scraping (plan §6.1): default profile stays edge-only.
+    """
     wu = client.claim()
     if wu is None:
         return SimpleNamespace(claimed=0, wu_id=None)
+    if str(wu.get("kind", "")).startswith("scrape.") and not allow_scraping:
+        return SimpleNamespace(claimed=0, wu_id=None, refused="scraping-not-opted-in")
     client.process(wu)
     return SimpleNamespace(claimed=1, wu_id=wu.get("wu_id"))

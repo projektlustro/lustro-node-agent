@@ -562,6 +562,10 @@ class NodeAgentClient:
 
     def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
         """Pull one WU from the edge and process it; None if no work (204).
+
+        Opted-in scraping (plan §6): scrape-kind work units are refused unless
+        the agent was started with the separate --enable-scraping profile;
+        only signed-manifest extractor IDs are ever accepted (scrape_manifest).
         
         Security note: When http is a FetchBackend (WASM/browser), the browser's
         fetch API loads the entire response body into memory before we can check
@@ -617,6 +621,9 @@ class NodeAgentClient:
             
             if not isinstance(wu, dict):
                 raise CorePinError("edge returned a non-object work unit")
+            if wu.get("kind") == "scrape" and os.environ.get("LUSTRO_NODE_SCRAPING_ENABLED") != "1":
+                self._joblog.append({"event": "scrape_refused", "reason": "opt-in profile not enabled"})
+                return None
             return self.process_wu(wu, http=client)
         finally:
             if owns_client:
