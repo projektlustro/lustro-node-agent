@@ -257,6 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stub", action="store_true",
         help="use the stub classifier (for tests / smoke runs)"
     )
+    run_p.add_argument(
+        "--once", action="store_true",
+        help="claim at most one compatible work unit and exit "
+        "(bounded adapter for verified ephemeral/Serverless paths; plan §1a.4)"
+    )
     run_p.set_defaults(func=cmd_run)
 
     dump_p = sub.add_parser("dump-log", help="print the local job log")
