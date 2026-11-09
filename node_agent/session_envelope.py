@@ -82,8 +82,12 @@ def encrypt_envelope(envelope: dict, node_pub: x25519.X25519PublicKey) -> bytes:
     return salt + nonce + ct
 
 
-def decrypt_envelope(sealed: bytes, node_key: x25519.X25519PrivateKey) -> dict:
+def decrypt_envelope(sealed: bytes, node_key: x25519.X25519PrivateKey,
+                     deadline: str | None = None, now: str | None = None) -> dict:
     salt, nonce, ct = sealed[:32], sealed[32:44], sealed[44:]
     shared = node_key.exchange(x25519.X25519PublicKey.from_public_bytes(salt))
     key = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"lustro-session-envelope").derive(shared)
-    return json.loads(ChaCha20Poly1305(key).decrypt(nonce, ct, None))
+    envelope = json.loads(ChaCha20Poly1305(key).decrypt(nonce, ct, None))
+    if deadline is not None:
+        check_deadline(deadline, now or datetime.now(timezone.utc).isoformat())
+    return envelope

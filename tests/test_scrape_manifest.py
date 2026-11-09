@@ -73,9 +73,9 @@ def test_resolve_and_pin_rejects_rebinding_to_private_ip():
         ip = "8.8.8.8" if calls["n"] == 1 else "169.254.169.254"
         return [(2, 1, 6, "", (ip, port))]
 
-    assert m.resolve_and_pin("example.com", resolver) == "8.8.8.8"
+    assert m.resolve_and_pin("example.com", resolver=resolver) == "8.8.8.8"
     with pytest.raises(m.ManifestViolation):
-        m.resolve_and_pin("example.com", resolver)
+        m.resolve_and_pin("example.com", resolver=resolver)
 
 
 def test_redirect_revalidated_against_manifest():

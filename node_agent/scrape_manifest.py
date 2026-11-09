@@ -65,7 +65,7 @@ def request_allowed(manifest: dict, method: str, host: str, port: int, path: str
     return True
 
 
-def resolve_and_pin(host: str, resolver) -> str:
+def resolve_and_pin(host: str, port: int = 443, resolver=None) -> str:
     """Resolve host and pin the actual socket destination.
 
     Every resolved IP must be global (check_destination_ip); the pinned IP is
@@ -76,7 +76,7 @@ def resolve_and_pin(host: str, resolver) -> str:
 
     if resolver is None:
         resolver = socket.getaddrinfo
-    infos = resolver(host, 443, proto=socket.IPPROTO_TCP)
+    infos = resolver(host, port, proto=socket.IPPROTO_TCP)
     ips = sorted({info[4][0] for info in infos})
     if not ips:
         raise ManifestViolation(f"no addresses for {host}")
@@ -98,5 +98,5 @@ def revalidate_redirect(manifest: dict, location: str, resolver=None) -> str:
     entry = _entry_for(manifest, host, port)
     if entry is None:
         raise ManifestViolation(f"redirect target not in manifest: {host}:{port}")
-    resolve_and_pin(host, resolver)
+    resolve_and_pin(host, port, resolver)
     return location
