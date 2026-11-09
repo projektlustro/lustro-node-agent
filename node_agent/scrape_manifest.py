@@ -61,3 +61,40 @@ def request_allowed(manifest: dict, method: str, host: str, port: int, path: str
         if set(variables.keys()) != allowed_params:
             raise ManifestViolation("parameter substitution rejected")
     return True
+
+
+def resolve_and_pin(host: str, resolver) -> str:
+    """Resolve host and pin the actual socket destination.
+
+    Every resolved IP must be global (check_destination_ip); the pinned IP is
+    what the connection actually uses, so DNS rebinding cannot redirect the
+    request after validation.
+    """
+    import socket
+
+    if resolver is None:
+        resolver = socket.getaddrinfo
+    infos = resolver(host, 443, proto=socket.IPPROTO_TCP)
+    ips = sorted({info[4][0] for info in infos})
+    if not ips:
+        raise ManifestViolation(f"no addresses for {host}")
+    for ip in ips:
+        check_destination_ip(ipaddress.ip_address(ip))
+    return ips[0]
+
+
+def revalidate_redirect(manifest: dict, location: str, resolver=None) -> str:
+    """Every redirect hop is revalidated against the signed manifest and the
+    pinned destination is recomputed — redirects cannot escape the allowlist."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(location)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if parsed.scheme not in ("https", "http"):
+        raise ManifestViolation(f"redirect scheme refused: {parsed.scheme}")
+    entry = _entry_for(manifest, host, port)
+    if entry is None:
+        raise ManifestViolation(f"redirect target not in manifest: {host}:{port}")
+    resolve_and_pin(host, resolver)
+    return location

@@ -61,3 +61,28 @@ def test_non_global_ip_rejected(ip):
 def test_global_ip_allowed(ip):
     m = _mod()
     assert m.check_destination_ip(ipaddress.ip_address(ip))
+
+
+def test_resolve_and_pin_rejects_rebinding_to_private_ip():
+    m = _mod()
+    # first resolution global, second (rebinding) private -> must refuse
+    calls = {"n": 0}
+
+    def resolver(host, port, proto=0):
+        calls["n"] += 1
+        ip = "8.8.8.8" if calls["n"] == 1 else "169.254.169.254"
+        return [(2, 1, 6, "", (ip, port))]
+
+    assert m.resolve_and_pin("example.com", resolver) == "8.8.8.8"
+    with pytest.raises(m.ManifestViolation):
+        m.resolve_and_pin("example.com", resolver)
+
+
+def test_redirect_revalidated_against_manifest():
+    m = _mod()
+    manifest = {"entries": [{"host": "example.com", "port": 443, "methods": ["GET"]}]}
+    assert m.revalidate_redirect(manifest, "https://example.com/x", resolver=lambda h, p, proto=0: [(2, 1, 6, "", ("8.8.8.8", p))])
+    with pytest.raises(m.ManifestViolation):
+        m.revalidate_redirect(manifest, "https://evil.com/x", resolver=lambda h, p, proto=0: [(2, 1, 6, "", ("8.8.8.8", p))])
+    with pytest.raises(m.ManifestViolation):
+        m.revalidate_redirect(manifest, "file:///etc/passwd")
