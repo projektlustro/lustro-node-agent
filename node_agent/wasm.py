@@ -17,7 +17,7 @@ import json
 from typing import Any, Callable
 
 from node_agent import _ed25519_pure as ed25519
-from node_agent.classifier import StubClassifier
+from node_agent.classifier import StubClassifier  # test-only; never default
 from node_agent.client import NodeAgentClient
 from node_agent.crypto import PureKeyring
 from node_agent.storage import BrowserStore
@@ -58,6 +58,20 @@ def _set_ship_cursor(cursor: int) -> None:
     _syncify(js._idbSet(BrowserStore.STORE, SHIP_CURSOR_KEY, cursor))
 
 
+class ModelUnavailable(Exception):
+    """No verified signed model artifact — fail visibly, never stub (plan §4.5)."""
+
+
+class FailClosedClassifier:
+    """Browser classifier placeholder until the signed ONNX bundle is served
+    and verified via the model registry; classify() always raises."""
+
+    def classify(self, payload):
+        raise ModelUnavailable(
+            "no verified signed model artifact in the browser; refusing to emit a stub result"
+        )
+
+
 class _BrowserNode:
     def __init__(
         self,
@@ -89,7 +103,7 @@ class _BrowserNode:
         if self._client is None:
             self._client = NodeAgentClient(
                 self._edge,
-                StubClassifier(),
+                FailClosedClassifier(),  # never a stub fallback (plan §4.5)
                 self._ensure_keyring(),
                 self._store,  # BrowserStore.append is the job-log surface
             )
