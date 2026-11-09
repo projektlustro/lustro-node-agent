@@ -60,6 +60,8 @@ def request_allowed(manifest: dict, method: str, host: str, port: int, path: str
         allowed_params = set(allowed.get("params", []))
         if set(variables.keys()) != allowed_params:
             raise ManifestViolation("parameter substitution rejected")
+        if set(body.keys()) - {"persistedQuery", "variables"}:
+            raise ManifestViolation("unexpected top-level keys (e.g. inline query) rejected")
     return True
 
 

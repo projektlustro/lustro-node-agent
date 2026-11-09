@@ -621,7 +621,7 @@ class NodeAgentClient:
             
             if not isinstance(wu, dict):
                 raise CorePinError("edge returned a non-object work unit")
-            if wu.get("kind") == "scrape" and os.environ.get("LUSTRO_NODE_SCRAPING_ENABLED") != "1":
+            if str(wu.get("kind", "")).startswith("scrape") and os.environ.get("LUSTRO_NODE_SCRAPING_ENABLED") != "1":
                 self._joblog.append({"event": "scrape_refused", "reason": "opt-in profile not enabled"})
                 return None
             return self.process_wu(wu, http=client)

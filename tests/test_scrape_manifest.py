@@ -86,3 +86,26 @@ def test_redirect_revalidated_against_manifest():
         m.revalidate_redirect(manifest, "https://evil.com/x", resolver=lambda h, p, proto=0: [(2, 1, 6, "", ("8.8.8.8", p))])
     with pytest.raises(m.ManifestViolation):
         m.revalidate_redirect(manifest, "file:///etc/passwd")
+
+
+def test_graphql_inline_query_key_rejected():
+    m = _mod()
+    manifest = {"entries": [{"host": "example.com", "port": 443, "methods": ["GET"],
+                             "graphql_persisted": {"abc123": {"params": ["id"]}}}]}
+    with pytest.raises(m.ManifestViolation):
+        m.request_allowed(manifest, "POST", "example.com", 443, "/graphql",
+                          {"persistedQuery": "abc123", "query": "mutation { x }", "variables": {"id": "1"}})
+
+
+def test_cookie_lookalike_domain_excluded():
+    import importlib
+    m = importlib.import_module("node_agent.session_envelope")
+    env = m.build_envelope(
+        {"cookies": [
+            {"name": "s", "domain": ".x.com", "value": "ok"},
+            {"name": "evil", "domain": "x.com.evil.tld", "value": "bad"},
+            {"name": "sub", "domain": ".sub.x.com", "value": "no"},
+        ]},
+        target="x.com", account="a", deadline="2026-11-10T00:00:00Z")
+    domains = [c["domain"] for c in env["cookies"]]
+    assert domains == [".x.com"]

@@ -46,3 +46,9 @@ def test_heartbeat_fences_on_lease_expiry(tmp_path):
     daemon = _daemon()
     with pytest.raises(daemon.LeaseLost):
         daemon.heartbeat(state_dir=tmp_path, lease_id="gone", generation=1)
+
+
+def test_lease_id_path_traversal_rejected(tmp_path):
+    daemon = _daemon()
+    with pytest.raises(daemon.LeaseLost):
+        daemon.heartbeat(state_dir=tmp_path, lease_id="../../etc/passwd", generation=1)

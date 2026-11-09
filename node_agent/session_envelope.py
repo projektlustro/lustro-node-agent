@@ -50,10 +50,17 @@ def check_deadline(deadline: str, now: str) -> None:
         raise EnvelopeExpired("envelope deadline passed")
 
 
+def _domain_match(cookie_domain: str, target: str) -> bool:
+    # cookie domain must equal the target or be a PARENT of it (a cookie for
+    # .sub.x.com must never be sent to x.com)
+    d = (cookie_domain or "").lstrip(".")
+    return target == d or target.endswith("." + d)
+
+
 def build_envelope(session: dict, target: str, account: str, deadline: str) -> dict:
     """Target-specific allowlisted session: necessary cookies + origin storage
     for the target only; proxy credentials and unrelated origins excluded."""
-    cookies = [c for c in session.get("cookies", []) if target in c.get("domain", "")]
+    cookies = [c for c in session.get("cookies", []) if _domain_match(c.get("domain", ""), target)]
     origins = {k: v for k, v in session.get("origins", {}).items() if k == f"https://{target}"}
     return {
         "cookies": cookies,
