@@ -16,6 +16,10 @@ class LeaseLost(Exception):
 
 
 def _lease_path(state_dir: Path, lease_id: str) -> Path:
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", lease_id or ""):
+        raise LeaseLost(f"invalid lease id {lease_id!r}")
     return Path(state_dir) / "leases" / f"{lease_id}.json"
 
 
