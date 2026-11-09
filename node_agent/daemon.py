@@ -1,0 +1,38 @@
+"""Persistent node-agent runtime (plan §4.1).
+
+`run --once` claims at most one compatible work unit and exits — the bounded
+adapter for verified ephemeral/Serverless execution paths. Internal and
+volunteer workers share this binary and claim loop; only server-provisioned
+trust and plugin allowlists differ.
+"""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+
+class LeaseLost(Exception):
+    """The lease is expired, superseded, or unknown — fenced (plan §2.4)."""
+
+
+def _lease_path(state_dir: Path, lease_id: str) -> Path:
+    return Path(state_dir) / "leases" / f"{lease_id}.json"
+
+
+def heartbeat(state_dir, lease_id: str, generation: int) -> None:
+    """Refresh a lease heartbeat; raise LeaseLost if the lease is not live."""
+    path = _lease_path(state_dir, lease_id)
+    if not path.exists():
+        raise LeaseLost(f"unknown lease {lease_id}")
+    lease = json.loads(path.read_text())
+    if lease.get("generation") != generation or lease.get("state") != "live":
+        raise LeaseLost(f"lease {lease_id} fenced at generation {generation}")
+
+
+def run_once(client, state_dir) -> SimpleNamespace:
+    """Claim at most one work unit, process it, and exit."""
+    wu = client.claim()
+    if wu is None:
+        return SimpleNamespace(claimed=0, wu_id=None)
+    client.process(wu)
+    return SimpleNamespace(claimed=1, wu_id=wu.get("wu_id"))

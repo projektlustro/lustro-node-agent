@@ -66,12 +66,14 @@ class EgressGuard:
                 f"{self.allowed_base_url!r} (outbound-only guarantee)"
             )
         
-        # Validate port (if specified)
-        if parsed.port and parsed.port != self._port:
-            # If the URL specifies a port, it must match our expected port
+        # Validate effective port: a URL that omits the port uses the scheme
+        # default, which must still match the configured edge's effective port
+        # (an explicit non-default edge port must not be bypassed by omission).
+        effective_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if effective_port != self._port:
             raise EgressViolation(
-                f"egress refused: {url!r} port {parsed.port} != allowlisted port "
+                f"egress refused: {url!r} effective port {effective_port} != allowlisted port "
                 f"{self._port} (outbound-only guarantee)"
             )
-        
+
         return url
