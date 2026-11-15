@@ -1,8 +1,8 @@
 """Regression tests for the WASM fetch transport (browser backend).
 
-Bugs caught by the live in-browser gate (apps/public-site/scripts/
-sim-live-wasm-node.mjs) against the production edge — the fakes in
-test_node_agent.py never exercised the REAL FetchBackend code paths:
+The current live browser gate is read-only while no verified browser model ships.
+These unit tests cover real ``FetchBackend`` paths that ``test_node_agent.py``
+fakes cannot exercise under Pyodide:
 
 1. ``except js.JSError`` — that attribute does not exist under Pyodide 0.27
    (it is ``pyodide.ffi.JsException``), so evaluating the except clause raised

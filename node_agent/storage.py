@@ -66,13 +66,17 @@ class BrowserStore:
         import js
 
         raw = _syncify(js._idbGet(self.STORE, "joblog"))
-        if not raw:
+        if raw is None:
             return []
+        if not isinstance(raw, str):
+            raise RuntimeError("browser job log is malformed")
         try:
             data = json.loads(raw)
-        except (TypeError, ValueError):
-            return []
-        return data if isinstance(data, list) else []
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("browser job log is malformed") from exc
+        if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+            raise RuntimeError("browser job log is malformed")
+        return data
 
     def clear(self) -> None:
         """One-command leave: wipe the seed and the job log."""

@@ -1,13 +1,8 @@
-"""Pyodide entry point for the in-browser WASM node.
+"""Pyodide entry point for the browser node-agent protocol.
 
-Wires the pure-Python crypto/transport/storage backends into the SAME
-NodeAgentClient loop the CLI uses, so the browser node does byte-identical work
-against the real edge (https://projektlustro.eu/v1/wu): register, pull, verify
-the core signature, classify, sign with the local Ed25519 key, POST the result.
-
-Called from JS on the Start button. Fetches are awaited via Pyodide syncify, so
-the Python stays a plain sync API. ``httpx`` is imported by client.py but never
-instantiated here — every call is handed a ``FetchBackend`` instead.
+Browser transport, storage, and cryptographic paths use the native client.
+Classification remains unavailable until a signed Pyodide-compatible model
+bundle and verified inference loader are shipped.
 """
 
 from __future__ import annotations
@@ -17,7 +12,7 @@ import json
 from typing import Any, Callable
 
 from node_agent import _ed25519_pure as ed25519
-from node_agent.classifier import StubClassifier  # test-only; never default
+from node_agent.classifier import Classifier
 from node_agent.client import NodeAgentClient
 from node_agent.crypto import PureKeyring
 from node_agent.storage import BrowserStore
@@ -26,6 +21,7 @@ from node_agent.transport import FetchBackend, TransportError
 # Same origin as the page — the WASM node is served from projektlustro.eu, so
 # /v1/wu is same-origin (no CORS, no subdomain, no extra DNS).
 DEFAULT_EDGE = "https://projektlustro.eu"
+DEFAULT_TENANT = "pl"
 
 # Ship cursor key in IndexedDB — tracks the index of the last shipped joblog row.
 SHIP_CURSOR_KEY = "ship_cursor"
@@ -58,17 +54,15 @@ def _set_ship_cursor(cursor: int) -> None:
     _syncify(js._idbSet(BrowserStore.STORE, SHIP_CURSOR_KEY, cursor))
 
 
+
 class ModelUnavailable(Exception):
-    """No verified signed model artifact — fail visibly, never stub (plan §4.5)."""
+    """Browser inference has no verified model artifact."""
 
 
-class FailClosedClassifier:
-    """Browser classifier placeholder until the signed ONNX bundle is served
-    and verified via the model registry; classify() always raises."""
-
-    def classify(self, payload):
+class FailClosedClassifier(Classifier):
+    def classify(self, content: str, lang: str | None = None):
         raise ModelUnavailable(
-            "no verified signed model artifact in the browser; refusing to emit a stub result"
+            "browser classification requires a signed Pyodide-compatible model artifact and verified loader"
         )
 
 
@@ -78,10 +72,12 @@ class _BrowserNode:
         edge: str,
         on_step: Callable[[str], None],
         store: BrowserStore,
+        tenant: str,
     ) -> None:
         self._edge = edge
         self._on_step = on_step
         self._store = store
+        self._tenant = tenant
         self._seed: bytes | None = None
         self._ring: PureKeyring | None = None
         self._http = FetchBackend()
@@ -103,9 +99,10 @@ class _BrowserNode:
         if self._client is None:
             self._client = NodeAgentClient(
                 self._edge,
-                FailClosedClassifier(),  # never a stub fallback (plan §4.5)
+                FailClosedClassifier(),
                 self._ensure_keyring(),
                 self._store,  # BrowserStore.append is the job-log surface
+                tenant=self._tenant,
             )
         return self._client
 
@@ -118,13 +115,10 @@ class _BrowserNode:
         return self.pubkey()
 
     def run_once(self) -> dict | None:
-        """Register on first call, then pull+process one work unit. Returns the
-        posted result, or None when there is no work (204)."""
-        client = self._ensure_client()
-        if not self._registered:
-            client.register_agent(http=self._http)
-            self._registered = True
-        return client.pull_and_process(http=self._http)
+        """Refuse before registering or leasing work without browser inference."""
+        raise ModelUnavailable(
+            "browser classification requires a signed Pyodide-compatible model artifact and verified loader"
+        )
 
     def leave(self) -> None:
         """One-command leave: wipe the local seed + job log."""
@@ -223,15 +217,19 @@ def new_node(
     edge: str = DEFAULT_EDGE,
     on_step: Callable[[str], None] | None = None,
     pinned_key_b64: str | None = None,
+    tenant: str = DEFAULT_TENANT,
 ) -> _BrowserNode:
     _pin_core_key(pinned_key_b64)
-    return _BrowserNode(edge, on_step or (lambda _msg: None), BrowserStore())
+    return _BrowserNode(
+        edge, on_step or (lambda _msg: None), BrowserStore(), tenant
+    )
 
 
 def run_once(
     edge: str = DEFAULT_EDGE,
     on_step: Callable[[str], None] | None = None,
     pinned_key_b64: str | None = None,
+    tenant: str = DEFAULT_TENANT,
 ) -> Any:
     """Convenience: build a node and process one work unit (registers if needed)."""
-    return new_node(edge, on_step, pinned_key_b64).run_once()
+    return new_node(edge, on_step, pinned_key_b64, tenant).run_once()

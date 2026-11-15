@@ -18,7 +18,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from node_agent import cli, core_pin
 from node_agent.classifier import StubClassifier
-from node_agent.client import NodeAgentClient, canonical_wu_bytes
+from node_agent.client import (
+    NodeAgentClient,
+    canonical_pull_bytes,
+    canonical_success_ack_bytes,
+    canonical_wu_bytes,
+)
 from node_agent.egress import EgressViolation
 from node_agent.joblog import JobLog
 from node_agent.keys import ensure_keypair
@@ -41,6 +46,46 @@ def _signed_wu(priv, wu):
     return {**wu, "core_sig": base64.b64encode(sig).decode()}
 
 
+def _signed_success_ack(priv, wu_id, result_body, authority="authoritative-v1"):
+    ack = {
+        "accepted": True,
+        "wu_id": wu_id,
+        "authority": authority,
+        "agent_pubkey": result_body["agent_pubkey"],
+        "agent_sig": result_body["agent_sig"],
+        "core_pubkey_id": "lustro-core-key-v1",
+    }
+    ack["core_sig"] = base64.b64encode(
+        priv.sign(canonical_success_ack_bytes(ack))
+    ).decode()
+    return ack
+
+
+def _assert_signed_pull(request):
+    headers = request.headers
+    agent_pubkey = headers["X-Lustro-Agent-Pubkey"]
+    timestamp = int(headers["X-Lustro-Agent-Timestamp"])
+    nonce = headers["X-Lustro-Agent-Nonce"]
+    tenant = headers["X-Lustro-Agent-Tenant"]
+    signature = base64.b64decode(
+        headers["X-Lustro-Agent-Signature"], validate=True
+    )
+    assert tenant == "pl"
+    assert len(nonce) == 32
+    Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(agent_pubkey, validate=True)
+    ).verify(
+        signature,
+        canonical_pull_bytes(
+            agent_pubkey,
+            timestamp,
+            nonce,
+            core_pin.pinned_core_public_key_sha256(),
+            tenant,
+        ),
+    )
+
+
 def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     priv, pem = _core()
     monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
@@ -52,14 +97,17 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     posted = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        # Egress: the mock edge only answers its own host.
         assert request.url.host == "edge.lustro.test"
         if request.method == "GET" and request.url.path == "/v1/wu":
+            _assert_signed_pull(request)
             return httpx.Response(200, json=wu)
         if request.method == "POST" and request.url.path == "/v1/wu/wu-42/result":
             posted["body"] = json.loads(request.content)
             posted["path"] = request.url.path
-            return httpx.Response(202, json={"ok": True})
+            posted["ack"] = _signed_success_ack(
+                priv, "wu-42", posted["body"], authority="shadow-non-authoritative"
+            )
+            return httpx.Response(200, json=posted["ack"])
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -67,7 +115,13 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
 
     keys = ensure_keypair(tmp_path / "agent.key")
     jl = JobLog(tmp_path / "joblog.jsonl")
-    client = NodeAgentClient(EDGE, StubClassifier("kremlin-narrative", 0.84), keys, jl)
+    client = NodeAgentClient(
+        EDGE,
+        StubClassifier("kremlin-narrative", 0.84),
+        keys,
+        jl,
+        tenant="pl",
+    )
 
     out = client.pull_and_process(http=http)
 
@@ -77,9 +131,22 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     assert set(body) == {"labels", "score", "agent_pubkey", "agent_sig"}
     assert body["labels"] == ["kremlin-narrative"]
     assert body["score"] == 0.84
-    # out is the POSTed body + text_preview (CLI display only, not signed).
+    # out includes the signed Core authority plus the local text preview.
+
+    ack = posted["ack"]
+    assert ack["accepted"] is True
+    assert ack["wu_id"] == "wu-42"
+    assert ack["agent_pubkey"] == body["agent_pubkey"]
+    assert ack["agent_sig"] == body["agent_sig"]
+    Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(pem, validate=True)
+    ).verify(
+        base64.b64decode(ack["core_sig"], validate=True),
+        canonical_success_ack_bytes(ack),
+    )
     assert {k: out[k] for k in body} == body
     assert out["text_preview"] == "Rosja niesie pokój"
+    assert out["authority"] == ack["authority"]
 
     # The agent signature verifies against the LOCAL agent public key, and that
     # public key is the one we generated locally (the core never minted it).
@@ -107,6 +174,12 @@ def test_e2e_loop_against_mock_edge(tmp_path, monkeypatch):
     events = [r["event"] for r in jl.read_all()]
     assert "wu_processed" in events
     assert "replay_rejected" in events
+
+    ack_event = next(
+        row for row in jl.read_all()
+        if row["event"] == "wu_result_acked"
+    )
+    assert ack_event["receipt"] == ack
 
 
 def test_e2e_egress_blocks_offhost_with_real_client(tmp_path, monkeypatch):
@@ -297,7 +370,11 @@ def test_cmd_run_pulls_after_successful_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(
         NodeAgentClient,
         "pull_and_process",
-        lambda self, http=None: {"labels": ["safe"], "score": 0.1},
+        lambda self, http=None: {
+            "labels": ["safe"],
+            "score": 0.1,
+            "authority": "authoritative-v1",
+        },
     )
 
     assert cli.main(["run", "--stub"]) == 0

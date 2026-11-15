@@ -41,12 +41,12 @@ class _Response(Protocol):
 class HttpClient(Protocol):
     """Protocol defining the interface expected from HTTP clients."""
     
-    def get(self, url: str) -> _Response: ...
+    def get(self, url: str, *, headers: dict[str, str] | None = None) -> _Response: ...
     def post(self, url: str, json: Any) -> _Response: ...
     def close(self) -> None: ...
-    
-    # Optional: streaming support
-    def stream(self, method: str, url: str) -> _Response: ...
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> _Response: ...
 
 
 class HttpxBackend:
@@ -57,15 +57,19 @@ class HttpxBackend:
 
         self._client = httpx.Client(timeout=timeout)
 
-    def get(self, url: str) -> _Response:
-        return self._client.get(url)
+    def get(
+        self, url: str, *, headers: dict[str, str] | None = None
+    ) -> _Response:
+        return self._client.get(url, headers=headers)
 
     def post(self, url: str, json: Any) -> _Response:
         return self._client.post(url, json=json)
-    
-    def stream(self, method: str, url: str) -> _Response:
+
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> _Response:
         """Open a streaming connection."""
-        return self._client.stream(method, url)
+        return self._client.stream(method, url, headers=headers)
 
     def close(self) -> None:
         self._client.close()
@@ -187,7 +191,15 @@ class FetchBackend:
         if body and len(body) > MAX_REQUEST_BODY_BYTES:
             raise TransportError(f"request body too large: {len(body)} bytes")
 
-    def _fetch(self, url: str, *, method: str, body: str | None, stream: bool = False) -> _FetchResponse:
+    def _fetch(
+        self,
+        url: str,
+        *,
+        method: str,
+        body: str | None,
+        headers: dict[str, str] | None = None,
+        stream: bool = False,
+    ) -> _FetchResponse:
         import js
         # Pyodide 0.27: JS exceptions surface as pyodide.ffi.JsException.
         # (js.JSError does not exist — evaluating that except clause itself
@@ -210,8 +222,11 @@ class FetchBackend:
         
         if body is not None:
             opts["body"] = body
-            opts["headers"] = {"Content-Type": "application/json"}
-        
+        request_headers = {"Content-Type": "application/json"} if body is not None else {}
+        if headers:
+            request_headers.update(headers)
+        if request_headers:
+            opts["headers"] = request_headers
         opts_js = _to_js_object(opts)
         
         try:
@@ -240,27 +255,23 @@ class FetchBackend:
         except Exception as e:  # AbortError or network failure
             raise TransportError(f"fetch {method} {url} failed/aborted: {e}") from e
 
-    def get(self, url: str) -> _FetchResponse:
-        return self._fetch(url, method="GET", body=None)
+    def get(
+        self, url: str, *, headers: dict[str, str] | None = None
+    ) -> _FetchResponse:
+        return self._fetch(url, method="GET", body=None, headers=headers)
 
     def post(self, url: str, json: Any) -> _FetchResponse:
         return self._fetch(url, method="POST", body=js_dumps(json))
-    
-    def stream(self, method: str, url: str) -> _FetchResponse:
-        """Open a 'streaming' connection.
 
-        Under Pyodide/syncify true ReadableStream streaming is not usable (see
-        _fetch), so this is a buffered fetch behind the httpx-style stream()
-        API; the response still supports the context-manager protocol and
-        iter_bytes with the MAX_WU_RESPONSE_BYTES limit.
-        """
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> _FetchResponse:
+        """Open a buffered browser fetch behind the shared streaming API."""
         if method.upper() == "GET":
-            return self._fetch(url, method=method, body=None, stream=True)
-        else:
-            # For POST with streaming, we'd need to handle request body streaming too
-            # For now, fall back to regular post
-            raise NotImplementedError("streaming POST not supported in FetchBackend")
-
+            return self._fetch(
+                url, method=method, body=None, headers=headers, stream=True
+            )
+        raise NotImplementedError("streaming POST not supported in FetchBackend")
     def close(self) -> None:
         pass
 

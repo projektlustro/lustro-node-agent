@@ -68,8 +68,22 @@ def _print_fail(msg: str) -> None:
     print(f"      ✗ {msg}", file=sys.stderr)
 
 
-def _print_result(labels: list[str], score: float, text_preview: str) -> None:
-    """Print the classification result with context."""
+def _authority_summary(authority: str) -> str:
+    return {
+        "authoritative-v1": "stored as detection record",
+        "shadow-non-authoritative": (
+            "stored as non-authoritative shadow; no detection created"
+        ),
+        "non-authoritative-local-stub": (
+            "local stub only; no detection created"
+        ),
+    }[authority]
+
+
+def _print_result(
+    labels: list[str], score: float, text_preview: str, authority: str
+) -> None:
+    """Print the classification result with its verified Core authority."""
     label = labels[0] if labels else "unknown"
     is_disinfo = label != "benign" and score >= 0.6
 
@@ -77,17 +91,23 @@ def _print_result(labels: list[str], score: float, text_preview: str) -> None:
     print("  " + "-" * 52)
     print("  CLASSIFICATION RESULT")
     print("  " + "-" * 52)
-    print(f"  label:    {label}")
-    print(f"  score:    {score:.3f}")
-    print(f"  verdict:  {'⚠ DISINFORMATION DETECTED' if is_disinfo else '✓ benign'}")
+    print(f"  label:     {label}")
+    print(f"  score:     {score:.3f}")
+    if is_disinfo and authority == "authoritative-v1":
+        verdict = "⚠ DISINFORMATION DETECTED"
+    elif is_disinfo:
+        verdict = "⚠ NON-AUTHORITATIVE CLASSIFICATION"
+    else:
+        verdict = "✓ benign classification"
+    print(f"  verdict:   {verdict}")
+    print(f"  authority: {authority}")
+    print(f"  storage:   {_authority_summary(authority)}")
     print()
     print("  classified text (first 200 chars):")
     for line in textwrap.wrap(text_preview[:200], width=50):
         print(f"    {line}")
     print()
     print("  " + "-" * 52)
-    print(f"  result submitted to core → stored as detection (pending_review)")
-    print()
 
 
 def _print_next_steps() -> None:
@@ -98,6 +118,7 @@ def _print_next_steps() -> None:
     print("    docker run --rm --pull=always --platform linux/amd64 \\")
     print("      -v ~/.lustro-node-agent:/agent/.lustro-node-agent \\")
     print("      -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \\")
+    print("      -e LUSTRO_NODE_TENANT=pl \\")
     print("      ghcr.io/projektlustro/node-agent:latest")
     print()
     print("  • Schedule in cron for continuous participation:")
@@ -136,6 +157,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         joblog=joblog,
         seen_path=DEFAULT_SEEN_PATH,
         participant_token=os.environ.get("LUSTRO_NODE_TOKEN", ""),
+        tenant=getattr(args, "tenant", None),
     )
     registered_path = STATE_DIR / "registered"
     is_registered = registered_path.exists()
@@ -168,7 +190,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         _print_next_steps()
         return 0
 
-    _print_ok(f"received (labels={result['labels']} score={result['score']})")
+    if result.get("terminal") is True:
+        disposition = result.get("disposition", "unknown")
+        _print_ok(f"terminal receipt; work unit ended ({disposition})")
+        return 0
+    authority = result["authority"]
+    _print_ok(f"Core acknowledgement verified (authority={authority})")
 
     text_preview = result.get("text_preview", "")
 
@@ -176,9 +203,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     _print_ok(f"multilingual E5 model → {result['labels'][0]} ({result['score']:.3f})")
 
     _print_step(4, "Submitting signed result to core")
-    _print_ok("accepted → stored as detection (pending_review)")
+    _print_ok(f"result status: {_authority_summary(authority)}")
 
-    _print_result(result["labels"], result["score"], text_preview)
+    _print_result(result["labels"], result["score"], text_preview, authority)
     _print_next_steps()
     return 0
 
@@ -255,6 +282,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run", help="pull and process the next work unit")
     run_p.add_argument("--edge", help="edge base URL (or LUSTRO_NODE_EDGE_URL)")
+    run_p.add_argument(
+        "--tenant",
+        help="two-letter tenant code (or LUSTRO_NODE_TENANT; default pl)",
+    )
     run_p.add_argument(
         "--stub", action="store_true",
         help="use the stub classifier (for tests / smoke runs)"

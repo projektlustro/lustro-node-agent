@@ -30,9 +30,16 @@ class JobLog:
         record = {"ts": time.time(), **entry}
         existed = self._path.exists()
         with self._path.open("a", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), 0o600)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         if not existed:
-            os.chmod(self._path, 0o600)
+            directory_fd = os.open(self._path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
 
     def read_all(self) -> list[dict]:
         if not self._path.exists():

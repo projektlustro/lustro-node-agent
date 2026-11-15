@@ -1,16 +1,15 @@
 """Regression: the WASM node must run with a pinned core key.
 
-The browser boot (apps/public-site/app/node/page.tsx) calls
-``node_agent.wasm.new_node(edge, on_step)`` and then ``run_once()``. Before this
-fix ``new_node`` took no pinned key and never seeded
-``LUSTRO_NODE_AGENT_PINNED_KEY_B64``, so ``_effective_pinned_key()`` returned ""
-and every real (core-signed) work unit was rejected fail-closed with::
+The browser boot (`apps/public-site/app/node/page.tsx`) calls
+`node_agent.wasm.new_node(edge, on_step, pinned_key_b64, tenant)` and then
+`run_once()`. Omitting `pinned_key_b64` leaves
+`LUSTRO_NODE_AGENT_PINNED_KEY_B64` unset, so `_effective_pinned_key()` is empty
+and every Core-signed work unit fails closed with:
 
     CorePinError: no pinned core public key configured (fail-closed)
 
-even though the page had the correct key in hand. These tests pin the key
-through the WASM entry point exactly as the browser does, and verify a
-core-signed WU now verifies instead of being rejected.
+The page must pass its pinned key explicitly. These tests pin that contract and
+verify a Core-signed work unit against the configured key.
 """
 
 import base64
@@ -60,14 +59,28 @@ def _make_core():
 
 def test_new_node_without_pinned_key_still_fails_closed():
     """Guard: omitting the key keeps the fail-closed contract (never trust all)."""
-    wasm.new_node("https://projektlustro.eu", lambda _m: None)
+    wasm.new_node("https://projektlustro.eu", lambda _m: None, tenant="pl")
     assert core_pin._effective_pinned_key() == ""
+
+
+def test_new_node_passes_tenant_to_client():
+    node = wasm.new_node(
+        "https://projektlustro.eu",
+        lambda _m: None,
+        tenant="fr",
+    )
+    assert node._ensure_client()._tenant == "fr"
 
 
 def test_new_node_pins_key_into_environment():
     """new_node(pinned_key_b64=...) makes that key the effective pinned key."""
     _priv, raw_b64 = _make_core()
-    wasm.new_node("https://projektlustro.eu", lambda _m: None, pinned_key_b64=raw_b64)
+    wasm.new_node(
+        "https://projektlustro.eu",
+        lambda _m: None,
+        pinned_key_b64=raw_b64,
+        tenant="pl",
+    )
     assert core_pin._effective_pinned_key() == raw_b64
 
 
@@ -75,7 +88,12 @@ def test_pinned_wasm_node_verifies_core_signed_wu(monkeypatch):
     """End-to-end: with the key pinned via new_node, a core-signed WU verifies
     instead of raising CorePinError (the exact browser failure)."""
     priv, raw_b64 = _make_core()
-    wasm.new_node("https://projektlustro.eu", lambda _m: None, pinned_key_b64=raw_b64)
+    wasm.new_node(
+        "https://projektlustro.eu",
+        lambda _m: None,
+        pinned_key_b64=raw_b64,
+        tenant="pl",
+    )
 
     wu = {
         "wu_id": "w1",

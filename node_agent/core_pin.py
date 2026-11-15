@@ -16,6 +16,7 @@ here it is a config constant the volunteer can audit.
 """
 
 import base64
+import hashlib
 import os
 
 # Identifier of the core key this agent build trusts. A WU declaring any other
@@ -72,6 +73,18 @@ def _effective_pinned_key() -> str:
 
 class CorePinError(Exception):
     """Raised when a work unit fails core key-pinning / signature checks."""
+
+def pinned_core_public_key_sha256() -> str:
+    raw_b64 = _effective_pinned_key()
+    if not raw_b64:
+        raise CorePinError("no pinned core public key configured (fail-closed)")
+    try:
+        raw = base64.b64decode(raw_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise CorePinError("pinned core key is not a valid raw Ed25519 key") from exc
+    if len(raw) != 32 or base64.b64encode(raw).decode() != raw_b64:
+        raise CorePinError("pinned core key is not a valid raw Ed25519 key")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _load_pinned_public_key(raw_b64: str):

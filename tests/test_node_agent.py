@@ -15,7 +15,8 @@ Invariants asserted here:
 
 import base64
 import json
-
+from json import dumps as json_dumps
+from urllib.parse import urlsplit
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -25,7 +26,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from node_agent import core_pin
 from node_agent.classifier import StubClassifier
-from node_agent.client import NodeAgentClient, ReplayError, canonical_wu_bytes, _validate_http_client
+from node_agent.client import (
+    NodeAgentClient,
+    ReplayError,
+    canonical_pull_bytes,
+    canonical_success_ack_bytes,
+    canonical_terminal_bytes,
+    canonical_wu_bytes,
+    _validate_http_client,
+)
 from node_agent.core_pin import CorePinError, verify_wu_signature
 from node_agent.egress import EgressGuard, EgressViolation
 from node_agent.joblog import JobLog
@@ -152,7 +161,7 @@ def test_core_cannot_mint_the_agent_key(tmp_path, monkeypatch):
         "wu_id": "wu-x", "kind": "text", "payload": {"text": "hi"},
         "agent_pubkey": attacker_pub,
     })
-    http = _FakeHttp()
+    http = _FakeHttp(core_private_key=priv)
     out = client.process_wu(wu, http=http)
     assert out["agent_pubkey"] == local_pub
     assert out["agent_pubkey"] != attacker_pub
@@ -334,12 +343,60 @@ def _agent_keys(tmp_path):
     return ensure_keypair(tmp_path / "agent.key")
 
 
+def _assert_signed_pull(url, headers, keys, tenant="pl"):
+    parsed = urlsplit(url)
+    assert parsed.path == "/v1/wu"
+    assert parsed.query == ""
+    assert set(headers) == {
+        "X-Lustro-Agent-Pubkey",
+        "X-Lustro-Agent-Timestamp",
+        "X-Lustro-Agent-Nonce",
+        "X-Lustro-Agent-Signature",
+        "X-Lustro-Agent-Tenant",
+    }
+    pub = keys.public_key_raw_b64()
+    timestamp = int(headers["X-Lustro-Agent-Timestamp"])
+    nonce = headers["X-Lustro-Agent-Nonce"]
+    signature = base64.b64decode(
+        headers["X-Lustro-Agent-Signature"], validate=True
+    )
+    assert headers["X-Lustro-Agent-Pubkey"] == pub
+    assert headers["X-Lustro-Agent-Tenant"] == tenant
+    assert len(nonce) == 32
+    keys.public_key().verify(
+        signature,
+        canonical_pull_bytes(
+            pub,
+            timestamp,
+            nonce,
+            core_pin.pinned_core_public_key_sha256(),
+            tenant,
+        ),
+    )
+
+
 def _signed_wu(priv, wu):
     # core_pubkey_id is part of the signed canonical body, so set it BEFORE
     # signing (the core signs over {wu_id,kind,payload,core_pubkey_id}).
     wu = {**wu, "core_pubkey_id": "lustro-core-key-v1"}
     sig = priv.sign(canonical_wu_bytes(wu))
     return {**wu, "core_sig": base64.b64encode(sig).decode()}
+
+
+def _signed_success_ack(core_private_key, url, result_body):
+    wu_id = urlsplit(url).path.split("/")[-2]
+    ack = {
+        "accepted": True,
+        "wu_id": wu_id,
+        "authority": "authoritative-v1",
+        "agent_pubkey": result_body["agent_pubkey"],
+        "agent_sig": result_body["agent_sig"],
+        "core_pubkey_id": "lustro-core-key-v1",
+    }
+    ack["core_sig"] = base64.b64encode(
+        core_private_key.sign(canonical_success_ack_bytes(ack))
+    ).decode()
+    return ack
 
 
 class _StreamCtx:
@@ -384,20 +441,25 @@ class _StreamCtx:
 
 
 class _FakeHttp:
-    def __init__(self, wu=None):
+    def __init__(self, wu=None, post_response=None, core_private_key=None):
         self.posts = []
         self.gets = []
+        self.pull_headers = []
         self._wu = wu
+        self._post_response = post_response
+        self._core_private_key = core_private_key
 
-    def stream(self, method, url):
+    def stream(self, method, url, *, headers=None):
         self.gets.append(url)
+        self.pull_headers.append(headers)
         wu = self._wu
         if wu is None:
             return _StreamCtx(204, b"")
         return _StreamCtx(200, json.dumps(wu).encode())
 
-    def get(self, url):
+    def get(self, url, *, headers=None):
         self.gets.append(url)
+        self.pull_headers.append(headers)
         wu = self._wu
         if wu is None:
             return _StreamCtx(204, b"")
@@ -405,22 +467,32 @@ class _FakeHttp:
 
     def post(self, url, json=None):
         self.posts.append((url, json))
-        return _FakePostResponse()
-    
+        if self._post_response is not None:
+            return self._post_response
+        if self._core_private_key is None:
+            return _FakePostResponse()
+        return _FakePostResponse(
+            body=_signed_success_ack(self._core_private_key, url, json)
+        )
+
     def close(self):
         pass
 
 
 class _FakePostResponse:
     """Simulates httpx response for POST requests."""
-    status_code = 200
-    
+
+    def __init__(self, status_code=200, body=None):
+        self.status_code = status_code
+        self._body = body or {}
+
     def json(self):
-        return {}
-    
+        return self._body
+
     def raise_for_status(self):
-        pass
-    
+        if self.status_code >= 400:
+            raise httpx.HTTPError(f"HTTP {self.status_code}")
+
     def close(self):
         pass
 
@@ -446,13 +518,17 @@ class _FakeFetchResponse:
 
 class _FakeFetchBackend:
     """Simulates transport.FetchBackend for testing the non-streaming path."""
-    def __init__(self, wu=None):
+
+    def __init__(self, wu=None, core_private_key=None):
         self.posts = []
         self.gets = []
+        self.pull_headers = []
         self._wu = wu
+        self._core_private_key = core_private_key
 
-    def get(self, url):
+    def get(self, url, *, headers=None):
         self.gets.append(url)
+        self.pull_headers.append(headers)
         wu = self._wu
         if wu is None:
             return _FakeFetchResponse(204, "")
@@ -460,7 +536,10 @@ class _FakeFetchBackend:
 
     def post(self, url, json=None):
         self.posts.append((url, json))
-        return _FakeFetchResponse(200, "{}")
+        if self._core_private_key is None:
+            return _FakeFetchResponse(200, "{}")
+        ack = _signed_success_ack(self._core_private_key, url, json)
+        return _FakeFetchResponse(200, json_dumps(ack))
 
     def close(self):
         pass
@@ -472,21 +551,27 @@ def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
     client = NodeAgentClient(
-        "https://edge.example.com", StubClassifier("disinfo", 0.91), keys, jl
+        "https://edge.example.com",
+        StubClassifier("disinfo", 0.91),
+        keys,
+        jl,
+        tenant="pl",
     )
 
     wu = _signed_wu(priv, {
         "wu_id": "wu-1", "kind": "text", "payload": {"text": "hi", "lang": "pl"},
     })
-    http = _FakeHttp(wu=wu)
+    http = _FakeHttp(wu=wu, core_private_key=priv)
 
     out = client.pull_and_process(http=http)
 
-    # The result body conforms to the FROZEN WorkUnitResult contract +
-    # text_preview (added for CLI display, not part of the signed contract).
-    assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig", "text_preview"}
+    # Authority comes from the signed acknowledgement; preview stays local.
+    assert set(out) == {
+        "labels", "score", "agent_pubkey", "agent_sig", "text_preview", "authority"
+    }
     assert out["labels"] == ["disinfo"]
     assert out["score"] == 0.91
+    assert out["authority"] == "authoritative-v1"
     # agent_pubkey is base64 of the raw 32-byte public key (core wire format).
     assert out["agent_pubkey"] == keys.public_key_raw_b64()
 
@@ -501,7 +586,8 @@ def test_full_loop_pull_verify_classify_sign_post(tmp_path, monkeypatch):
     pub.verify(base64.b64decode(out["agent_sig"]), signed_bytes)
 
     # Pulled + posted on the contract paths.
-    assert http.gets == ["https://edge.example.com/v1/wu"]
+    assert len(http.gets) == 1
+    _assert_signed_pull(http.gets[0], http.pull_headers[0], keys)
     assert http.posts[0][0] == "https://edge.example.com/v1/wu/wu-1/result"
 
     # Job log recorded the processed job.
@@ -529,21 +615,29 @@ def test_pull_with_fetch_backend_full_loop(tmp_path, monkeypatch):
     keys = _agent_keys(tmp_path)
     jl = JobLog(tmp_path / "joblog.jsonl")
     client = NodeAgentClient(
-        "https://edge.example.com", StubClassifier("benign", 0.1), keys, jl
+        "https://edge.example.com",
+        StubClassifier("benign", 0.1),
+        keys,
+        jl,
+        tenant="pl",
     )
 
     wu = _signed_wu(priv, {
         "wu_id": "wu-fetch-1", "kind": "text", "payload": {"text": "hello"},
     })
-    http = _FakeFetchBackend(wu=wu)
+    http = _FakeFetchBackend(wu=wu, core_private_key=priv)
 
     out = client.pull_and_process(http=http)
 
-    assert set(out) == {"labels", "score", "agent_pubkey", "agent_sig", "text_preview"}
+    assert set(out) == {
+        "labels", "score", "agent_pubkey", "agent_sig", "text_preview", "authority"
+    }
     assert out["labels"] == ["benign"]
     assert out["score"] == 0.1
+    assert out["authority"] == "authoritative-v1"
     assert out["agent_pubkey"] == keys.public_key_raw_b64()
-    assert http.gets == ["https://edge.example.com/v1/wu"]
+    assert len(http.gets) == 1
+    _assert_signed_pull(http.gets[0], http.pull_headers[0], keys)
     assert http.posts[0][0] == "https://edge.example.com/v1/wu/wu-fetch-1/result"
 
 
@@ -575,7 +669,7 @@ def test_fetchbackend_oversized_response_is_rejected(tmp_path, monkeypatch):
     
     huge_text = "a" * (MAX_WU_RESPONSE_BYTES + 1)
     http = _FakeFetchBackend(wu=None)
-    http.get = lambda url: _FakeFetchResponse(200, huge_text)
+    http.get = lambda url, *, headers=None: _FakeFetchResponse(200, huge_text)
     
     with pytest.raises(CorePinError, match="work unit response too large"):
         client.pull_and_process(http=http)
@@ -595,7 +689,7 @@ def test_fetchbackend_exactly_max_size_response(tmp_path, monkeypatch):
     
     exact_text = "a" * MAX_WU_RESPONSE_BYTES
     http = _FakeFetchBackend(wu=None)
-    http.get = lambda url: _FakeFetchResponse(200, exact_text)
+    http.get = lambda url, *, headers=None: _FakeFetchResponse(200, exact_text)
     
     with pytest.raises(CorePinError, match="not valid JSON"):
         client.pull_and_process(http=http)
@@ -618,7 +712,7 @@ def test_fetchbackend_unicode_byte_counting(tmp_path, monkeypatch):
     assert len(json_text.encode('utf-8')) > MAX_WU_RESPONSE_BYTES, "Test setup needs adjustment"
     
     http = _FakeFetchBackend(wu=None)
-    http.get = lambda url: _FakeFetchResponse(200, json_text)
+    http.get = lambda url, *, headers=None: _FakeFetchResponse(200, json_text)
     
     with pytest.raises(CorePinError, match="work unit response too large"):
         client.pull_and_process(http=http)
@@ -637,7 +731,7 @@ def test_anti_replay_rejects_repeated_wu_id(tmp_path, monkeypatch):
     wu = _signed_wu(priv, {
         "wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"},
     })
-    http = _FakeHttp()
+    http = _FakeHttp(core_private_key=priv)
 
     out = client.process_wu(wu, http=http)
     assert out["labels"] == ["bad"]
@@ -660,7 +754,7 @@ def test_anti_replay_rejects_repeated_nonce(tmp_path, monkeypatch):
         "https://edge.example.com", StubClassifier(), keys,
         JobLog(tmp_path / "joblog.jsonl"),
     )
-    http = _FakeHttp()
+    http = _FakeHttp(core_private_key=priv)
     wu1 = _signed_wu(priv, {
         "wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}, "nonce": "n1",
     })
@@ -685,7 +779,7 @@ def test_anti_replay_persists_across_restart(tmp_path, monkeypatch):
         "https://edge.example.com", StubClassifier("bad", 0.9), keys,
         JobLog(tmp_path / "a.jsonl"), seen_path=seen_path,
     )
-    out = client_a.process_wu(wu, http=_FakeHttp())
+    out = client_a.process_wu(wu, http=_FakeHttp(core_private_key=priv))
     assert out["labels"] == ["bad"]
     assert seen_path.exists()
 
@@ -714,7 +808,7 @@ def test_anti_replay_persists_nonce_across_restart(tmp_path, monkeypatch):
         "https://edge.example.com", StubClassifier(), keys,
         JobLog(tmp_path / "a.jsonl"), seen_path=seen_path,
     )
-    client_a.process_wu(wu1, http=_FakeHttp())
+    client_a.process_wu(wu1, http=_FakeHttp(core_private_key=priv))
 
     client_b = NodeAgentClient(
         "https://edge.example.com", StubClassifier(), keys,
@@ -737,7 +831,7 @@ def test_seen_store_permissions(tmp_path, monkeypatch):
     )
     client.process_wu(
         _signed_wu(priv, {"wu_id": "wu-1", "kind": "text", "payload": {"text": "hi"}}),
-        http=_FakeHttp(),
+        http=_FakeHttp(core_private_key=priv),
     )
     assert seen_dir.stat().st_mode & 0o777 == 0o700
     assert seen_path.stat().st_mode & 0o777 == 0o600
@@ -789,7 +883,7 @@ def test_oversized_wu_text_is_truncated_before_classify(tmp_path, monkeypatch):
     big = "x" * (1024 * 1024)
     wu = _signed_wu(priv, {"wu_id": "wu-big", "kind": "text", "payload": {"text": big}})
 
-    out = client.process_wu(wu, http=_FakeHttp())
+    out = client.process_wu(wu, http=_FakeHttp(core_private_key=priv))
 
     assert out["labels"] == ["bad"]
     assert seen_text["len"] == MAX_WU_TEXT_LEN
@@ -843,13 +937,13 @@ def test_oversized_response_refused_before_parse(tmp_path, monkeypatch):
             pass
 
     class _HugeHttp:
-        def get(self, url):
+        def get(self, url, *, headers=None):
             raise RuntimeError("_HugeHttp should use stream(), not get()")
         
         def post(self, url, json=None):
             raise RuntimeError("_HugeHttp should use stream(), not post()")
 
-        def stream(self, method, url):
+        def stream(self, method, url, *, headers=None):
             return _HugeStreamCtx()
 
         def close(self):
@@ -990,11 +1084,151 @@ def test_wu_not_marked_seen_when_post_fails(tmp_path, monkeypatch):
         client.process_wu(wu, http=failing)
 
     # The WU was not consumed; a retry on a healthy connection now succeeds.
-    ok = _FakeHttp()
+    ok = _FakeHttp(core_private_key=priv)
     out = client.process_wu(wu, http=ok)
     assert out["labels"] == ["bad"]
     assert len(ok.posts) == 1
 
+
+def test_pending_result_survives_restart_and_precedes_next_pull(tmp_path, monkeypatch):
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    joblog_path = tmp_path / "joblog.jsonl"
+    seen_path = tmp_path / "seen.jsonl"
+
+    class _CountingClassifier:
+        calls = 0
+
+        def classify(self, _text, _language):
+            self.calls += 1
+            return type("Result", (), {"label": "bad", "score": 0.9})()
+
+    classifier = _CountingClassifier()
+    wu = _signed_wu(
+        priv, {"wu_id": "wu-pending", "kind": "text", "payload": {"text": "hi"}}
+    )
+    client = NodeAgentClient(
+        "https://edge.example.com",
+        classifier,
+        keys,
+        JobLog(joblog_path),
+        seen_path=seen_path,
+    )
+
+    class _FailingHttp:
+        def __init__(self):
+            self.posts = []
+
+        def get(self, _url):
+            raise AssertionError("unexpected GET")
+
+        def post(self, url, json=None):
+            self.posts.append((url, json))
+            raise RuntimeError("result response lost")
+
+        def close(self):
+            pass
+
+    first_http = _FailingHttp()
+    with pytest.raises(RuntimeError, match="result response lost"):
+        client.process_wu(wu, http=first_http)
+
+    pending = next(
+        row for row in JobLog(joblog_path).read_all()
+        if row.get("event") == "wu_result_pending"
+    )
+    result_body = pending["result_body"]
+    assert classifier.calls == 1
+
+    restarted = NodeAgentClient(
+        "https://edge.example.com",
+        classifier,
+        _agent_keys(tmp_path),
+        JobLog(joblog_path),
+        seen_path=seen_path,
+    )
+    retry_http = _FakeHttp(core_private_key=priv)
+    out = restarted.pull_and_process(http=retry_http)
+
+    assert classifier.calls == 1
+    assert retry_http.gets == []
+    assert retry_http.posts == [
+        (f"https://edge.example.com/v1/wu/wu-pending/result", result_body)
+    ]
+    assert first_http.posts[0][1] == result_body
+    assert out["agent_sig"] == result_body["agent_sig"]
+    assert "wu-pending" in restarted._seen_wu_ids
+    events = [row["event"] for row in JobLog(joblog_path).read_all()]
+    assert events.count("wu_result_pending") == 1
+    assert events.count("wu_result_acked") == 1
+
+
+
+@pytest.mark.parametrize(
+    ("disposition", "status_code"),
+    [("source_version_changed", 409), ("lease_not_owned", 403)],
+)
+def test_signed_terminal_result_clears_pending_result(
+    tmp_path, monkeypatch, disposition, status_code
+):
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    joblog_path = tmp_path / "joblog.jsonl"
+    client = NodeAgentClient(
+        "https://edge.example.com",
+        StubClassifier("bad", 0.9),
+        keys,
+        JobLog(joblog_path),
+        seen_path=tmp_path / "seen.jsonl",
+    )
+    wu = _signed_wu(
+        priv,
+        {"wu_id": "wu-terminal", "kind": "text", "payload": {"text": "hi"}},
+    )
+
+    class _LostResponseHttp:
+        def get(self, _url):
+            raise AssertionError("unexpected GET")
+
+        def post(self, _url, json=None):
+            raise RuntimeError("result response lost")
+
+        def close(self):
+            pass
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        client.process_wu(wu, http=_LostResponseHttp())
+    pending = client._pending_result()
+    result_body = pending["result_body"]
+    receipt = {
+        "terminal": True,
+        "disposition": disposition,
+        "wu_id": "wu-terminal",
+        "agent_pubkey": result_body["agent_pubkey"],
+        "agent_sig": result_body["agent_sig"],
+        "core_pubkey_id": "lustro-core-key-v1",
+    }
+    receipt["core_sig"] = base64.b64encode(
+        priv.sign(canonical_terminal_bytes(receipt))
+    ).decode()
+
+    retry_http = _FakeHttp(
+        post_response=_FakePostResponse(status_code=status_code, body=receipt)
+    )
+    outcome = client.pull_and_process(http=retry_http)
+
+    assert outcome == {
+        "terminal": True,
+        "wu_id": "wu-terminal",
+        "disposition": disposition,
+    }
+    assert retry_http.gets == []
+    assert client._pending_result() is None
+    assert "wu-terminal" in client._seen_wu_ids
+    events = [row["event"] for row in JobLog(joblog_path).read_all()]
+    assert events.count("wu_result_terminal") == 1
 
 def test_non_2xx_result_leaves_wu_unseen(tmp_path, monkeypatch):
     """A 5xx response from /result must raise and leave the WU eligible for retry."""
@@ -1051,15 +1285,11 @@ def test_participant_token_syncs_accepted_work_to_dashboard(tmp_path, monkeypatc
         
         def post(self, url, json=None, headers=None):
             self.posts.append((url, json, headers))
-
-            class _R:
-                status_code = 201
-
-                @staticmethod
-                def raise_for_status():
-                    pass
-
-            return _R()
+            request = httpx.Request("POST", url)
+            if url.endswith("/result"):
+                ack = _signed_success_ack(priv, url, json)
+                return httpx.Response(200, json=ack, request=request)
+            return httpx.Response(201, request=request)
 
         def close(self):
             pass
@@ -1107,8 +1337,9 @@ def test_activity_sync_failure_does_not_retry_consumed_work_unit(
         def post(self, url, json=None, headers=None):
             self.calls += 1
             request = httpx.Request("POST", url)
-            if self.calls == 1:
-                return httpx.Response(202, request=request)
+            if url.endswith("/result"):
+                ack = _signed_success_ack(priv, url, json)
+                return httpx.Response(200, json=ack, request=request)
             return httpx.Response(503, request=request)
 
         def close(self):

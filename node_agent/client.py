@@ -31,8 +31,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
+import re
+import secrets
+import time
 from pathlib import Path
 from typing import Protocol, runtime_checkable, Any
 
@@ -45,7 +49,11 @@ except ModuleNotFoundError:  # WASM/Pyodide: FetchBackend is always supplied
     _HTTPError = OSError
 
 from node_agent.classifier import Classifier
-from node_agent.core_pin import CorePinError, verify_wu_signature
+from node_agent.core_pin import (
+    CorePinError,
+    pinned_core_public_key_sha256,
+    verify_wu_signature,
+)
 from node_agent.egress import EgressGuard
 from node_agent.joblog import JobLog
 from node_agent.keys import AgentKeys
@@ -69,7 +77,7 @@ class HttpClient(Protocol):
     generated via __getattr__, to prevent protocol bypass attacks.
     """
     
-    def get(self, url: str) -> _Response:
+    def get(self, url: str, *, headers: dict[str, str] | None = None) -> _Response:
         """Fetch a URL via GET."""
         ...
     
@@ -82,11 +90,35 @@ class HttpClient(Protocol):
         ...
     
     # Optional: streaming support (httpx.Client has this, FetchBackend does not)
-    def stream(self, method: str, url: str) -> Any:
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> Any:
         """Open a streaming connection."""
         ...
 
 DEFAULT_SEEN_PATH = Path.home() / ".lustro-node-agent" / "seen.jsonl"
+
+_TERMINAL_DISPOSITIONS = frozenset(
+    {
+        "agent_not_authorized",
+        "agent_revoked",
+        "invalid_result",
+        "result_conflict",
+        "source_erased",
+        "source_no_longer_eligible",
+        "source_version_changed",
+        "work_unit_expired",
+        "lease_not_owned",
+    }
+)
+
+_SUCCESS_AUTHORITIES = frozenset(
+    {
+        "authoritative-v1",
+        "shadow-non-authoritative",
+        "non-authoritative-local-stub",
+    }
+)
 
 # The WU payload text is adversary-controlled (it originates from scraped
 # content). Cap the length we ever hand to the classifier so a giant `text`
@@ -201,6 +233,59 @@ def canonical_wu_bytes(wu: dict) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_pull_bytes(
+    agent_pubkey: str,
+    timestamp: int,
+    nonce: str,
+    core_public_key_sha256: str,
+    tenant: str,
+) -> bytes:
+    return json.dumps(
+        {
+            "agent_pubkey": agent_pubkey,
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "core_public_key_sha256": core_public_key_sha256,
+            "tenant": tenant,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def canonical_success_ack_bytes(ack: dict) -> bytes:
+    return json.dumps(
+        {
+            "accepted": ack["accepted"],
+            "wu_id": ack["wu_id"],
+            "authority": ack["authority"],
+            "agent_pubkey": ack["agent_pubkey"],
+            "agent_sig": ack["agent_sig"],
+            "core_pubkey_id": ack["core_pubkey_id"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def canonical_terminal_bytes(receipt: dict) -> bytes:
+    return json.dumps(
+        {
+            "terminal": receipt["terminal"],
+            "disposition": receipt["disposition"],
+            "wu_id": receipt["wu_id"],
+            "agent_pubkey": receipt["agent_pubkey"],
+            "agent_sig": receipt["agent_sig"],
+            "core_pubkey_id": receipt["core_pubkey_id"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
 class NodeAgentClient:
     def __init__(
         self,
@@ -210,6 +295,7 @@ class NodeAgentClient:
         joblog: JobLog,
         seen_path: Path | None = None,
         participant_token: str = "",
+        tenant: str | None = None,
     ) -> None:
         self._egress = EgressGuard(edge_base_url)
         self._edge = self._egress.allowed_base_url
@@ -217,6 +303,9 @@ class NodeAgentClient:
         self._keys = keys
         self._joblog = joblog
         self._participant_token = participant_token
+        self._tenant = tenant if tenant is not None else os.environ.get("LUSTRO_NODE_TENANT", "pl")
+        if not isinstance(self._tenant, str) or not re.fullmatch(r"[a-z]{2}", self._tenant):
+            raise ValueError("node-agent tenant must be a two-letter lowercase code")
         self._seen_path = Path(seen_path) if seen_path is not None else DEFAULT_SEEN_PATH
         self._seen_wu_ids: set[str] = set()
         self._seen_nonces: set[str] = set()
@@ -375,25 +464,192 @@ class NodeAgentClient:
             return str(payload["lang"])
         return None
 
+    def _pending_result(self) -> dict[str, Any] | None:
+        pending: dict[str, dict[str, Any]] = {}
+        for row in self._joblog.read_all():
+            if not isinstance(row, dict) or row.get("event") == "_parse_error":
+                raise CorePinError("job log is malformed; refusing to pull work")
+            event = row.get("event")
+            if event not in {
+                "wu_result_pending",
+                "wu_result_acked",
+                "wu_result_terminal",
+            }:
+                continue
+            wu_id = row.get("wu_id")
+            if not isinstance(wu_id, str):
+                if event == "wu_result_pending":
+                    raise CorePinError("persisted result is missing wu_id")
+                continue
+            if event == "wu_result_pending":
+                pending[wu_id] = row
+            else:
+                pending.pop(wu_id, None)
+        return next(iter(pending.values()), None)
+    def _accept_success_ack(
+        self, response: Any, pending: dict[str, Any], result_body: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if response.status_code != 200:
+            return None
+        try:
+            ack = response.json()
+            if not isinstance(ack, dict) or set(ack) != {
+                "accepted",
+                "wu_id",
+                "authority",
+                "agent_pubkey",
+                "agent_sig",
+                "core_pubkey_id",
+                "core_sig",
+            }:
+                return None
+            if (
+                ack["accepted"] is not True
+                or ack["wu_id"] != pending["wu_id"]
+                or ack["authority"] not in _SUCCESS_AUTHORITIES
+                or ack["agent_pubkey"] != result_body["agent_pubkey"]
+                or ack["agent_sig"] != result_body["agent_sig"]
+                or not isinstance(ack["core_pubkey_id"], str)
+            ):
+                return None
+            core_sig = base64.b64decode(ack["core_sig"], validate=True)
+            if len(core_sig) != 64 or base64.b64encode(core_sig).decode() != ack["core_sig"]:
+                return None
+            verify_wu_signature(
+                canonical_success_ack_bytes(ack),
+                core_sig,
+                ack["core_pubkey_id"],
+            )
+        except Exception:
+            return None
+        return ack
+
+    def _accept_terminal_result(
+        self, response: Any, pending: dict[str, Any], result_body: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if response.status_code not in {403, 409, 410}:
+            return None
+        try:
+            receipt = response.json()
+            if not isinstance(receipt, dict) or set(receipt) != {
+                "terminal",
+                "disposition",
+                "wu_id",
+                "agent_pubkey",
+                "agent_sig",
+                "core_pubkey_id",
+                "core_sig",
+            }:
+                return None
+            wu_id = pending["wu_id"]
+            if (
+                receipt["terminal"] is not True
+                or receipt["disposition"] not in _TERMINAL_DISPOSITIONS
+                or receipt["wu_id"] != wu_id
+                or receipt["agent_pubkey"] != result_body["agent_pubkey"]
+                or receipt["agent_sig"] != result_body["agent_sig"]
+                or not isinstance(receipt["core_pubkey_id"], str)
+            ):
+                return None
+            core_sig = base64.b64decode(receipt["core_sig"], validate=True)
+            if (
+                len(core_sig) != 64
+                or base64.b64encode(core_sig).decode() != receipt["core_sig"]
+            ):
+                return None
+            verify_wu_signature(
+                canonical_terminal_bytes(receipt),
+                core_sig,
+                receipt["core_pubkey_id"],
+            )
+        except Exception:
+            return None
+        self._mark_seen({"wu_id": wu_id, "nonce": pending.get("nonce")})
+        self._joblog.append(
+            {
+                "event": "wu_result_terminal",
+                "wu_id": wu_id,
+                "disposition": receipt["disposition"],
+                "status": response.status_code,
+            }
+        )
+        return {
+            "terminal": True,
+            "wu_id": wu_id,
+            "disposition": receipt["disposition"],
+        }
+
+    def _submit_pending_result(
+        self, pending: dict[str, Any], http: HttpClient
+    ) -> dict[str, Any]:
+        wu_id = pending.get("wu_id")
+        result_body = pending.get("result_body")
+        if not isinstance(wu_id, str) or not wu_id:
+            raise CorePinError("persisted result is missing wu_id")
+        if (
+            len(wu_id) > MAX_WU_ID_LEN
+            or not all(c in ALLOWED_WU_ID_CHARS for c in wu_id)
+        ):
+            raise CorePinError("persisted result wu_id is invalid")
+        if not isinstance(result_body, dict) or set(result_body) != {
+            "labels",
+            "score",
+            "agent_pubkey",
+            "agent_sig",
+        }:
+            raise CorePinError("persisted result body is malformed")
+        if result_body["agent_pubkey"] != self._keys.public_key_raw_b64():
+            raise CorePinError("persisted result belongs to a different agent key")
+        text_preview = pending.get("text_preview")
+        if not isinstance(text_preview, str):
+            raise CorePinError("persisted result preview is malformed")
+
+        url = self._egress.check(f"{self._edge}/v1/wu/{wu_id}/result")
+        resp = http.post(url, json=result_body)
+        terminal = self._accept_terminal_result(resp, pending, result_body)
+        if terminal is not None:
+            return terminal
+        ack = self._accept_success_ack(resp, pending, result_body)
+        if ack is None:
+            resp.raise_for_status()
+            raise CorePinError("Core success acknowledgement is invalid")
+        self._joblog.append(
+            {"event": "wu_result_acked", "wu_id": wu_id, "receipt": ack}
+        )
+        self._mark_seen({"wu_id": wu_id, "nonce": pending.get("nonce")})
+        self._report_activity(
+            wu_id=wu_id,
+            agent_pubkey=result_body["agent_pubkey"],
+            http=http,
+        )
+        self._joblog.append(
+            {
+                "event": "wu_processed",
+                "wu_id": wu_id,
+                "labels": result_body["labels"],
+                "score": result_body["score"],
+                "status": resp.status_code,
+                "text_preview": text_preview,
+            }
+        )
+        return {
+            **result_body,
+            "text_preview": text_preview,
+            "authority": ack["authority"],
+        }
+
     def process_wu(self, wu: dict, http: httpx.Client | None = None) -> dict:
         """Verify, classify, sign and submit a single work unit.
 
-        Returns the posted `WorkUnitResult` body.
+        A signed result is persisted before POST and replayed byte-for-byte
+        after a transport failure or process restart.
         """
-        # The WU is adversary-influenced edge JSON; a non-object (e.g. a bare
-        # list) or a missing signed field must reject cleanly, never crash with
-        # an AttributeError/KeyError.
         if not isinstance(wu, dict):
             raise CorePinError("work unit is not a JSON object")
 
         wu_id = wu.get("wu_id")
-
-        # The contract makes wu_id required; reject a missing/empty one rather
-        # than building a bogus '/v1/wu/None/result' URL or an unkeyed result.
         if not wu_id:
             raise CorePinError("work unit missing wu_id")
-        
-        # Validate wu_id format to prevent memory exhaustion
         if not isinstance(wu_id, str):
             raise CorePinError("work unit wu_id must be string")
         if len(wu_id) > MAX_WU_ID_LEN:
@@ -401,9 +657,6 @@ class NodeAgentClient:
         if not all(c in ALLOWED_WU_ID_CHARS for c in wu_id):
             raise CorePinError("work unit wu_id contains invalid characters")
 
-        # Every field the canonical signed body covers must be present before we
-        # serialize it, or canonical_wu_bytes would KeyError. (kind/payload/
-        # core_pubkey_id join wu_id in the signed envelope.)
         for field in ("kind", "payload", "core_pubkey_id"):
             if field not in wu:
                 raise CorePinError(f"work unit missing {field}")
@@ -411,90 +664,61 @@ class NodeAgentClient:
             if isinstance(val, str) and len(val) > MAX_FIELD_LEN:
                 raise CorePinError(f"work unit {field} too long")
 
-        # Anti-replay before doing any work.
-        if self._seen(wu):
+        pending = self._pending_result()
+        if pending is not None and pending.get("wu_id") != wu_id:
+            raise RuntimeError("pending result must be delivered before new work")
+        if self._seen(wu) and pending is None:
             self._joblog.append({"event": "replay_rejected", "wu_id": wu_id})
             raise ReplayError(f"work unit already processed: {wu_id}")
 
-        # Verify the core signature against the pinned key. A missing or
-        # malformed signature envelope is an unverifiable WU -> CorePinError
-        # (never an uncaught crash on adversary-influenced edge JSON). We do NOT
-        # mark it seen, so a legitimate retry of a rejected WU is still possible.
         try:
             core_sig = base64.b64decode(wu["core_sig"], validate=True)
         except (KeyError, binascii.Error, ValueError) as e:
             raise CorePinError("work unit core_sig missing or malformed") from e
-        verify_wu_signature(
-            canonical_wu_bytes(wu),
-            core_sig,
-            wu.get("core_pubkey_id", ""),
-        )
+        canonical = canonical_wu_bytes(wu)
+        verify_wu_signature(canonical, core_sig, wu.get("core_pubkey_id", ""))
+        wu_digest = hashlib.sha256(canonical).hexdigest()
 
-        # Classify the payload.
-        payload = wu.get("payload")
-        result = self._classifier.classify(
-            self._payload_text(payload), self._payload_lang(payload)
-        )
-
-        # Sign the result with the LOCAL agent key. The signed bytes bind the
-        # labels + score to this wu_id; the private key never enters the body.
-        # MUST match services/core/app/wu_canonical.py (canonical_result_bytes):
-        # score coerced to float and ensure_ascii=False, so an integer score or
-        # a non-ASCII label still verifies on the core.
-        labels = [result.label]
-        score = float(result.score)
-        signed_payload = {"wu_id": wu_id, "labels": labels, "score": score}
-        result_bytes = json.dumps(
-            signed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-        agent_sig = base64.b64encode(self._keys.sign(result_bytes)).decode()
-
-        # FROZEN WorkUnitResult shape — exactly these four fields. labels/score
-        # are reused verbatim from the signed payload so the bytes we signed and
-        # the body we POST can never drift apart.
-        body = {
-            "labels": labels,
-            "score": score,
-            "agent_pubkey": self._keys.public_key_raw_b64(),
-            "agent_sig": agent_sig,
-        }
-
-        url = self._egress.check(f"{self._edge}/v1/wu/{wu_id}/result")
         owns_client = http is None
         _validate_http_client(http, "process_wu")
         client = http or httpx.Client(timeout=30)
         try:
-            resp = client.post(url, json=body)
-            resp.raise_for_status()
+            if pending is not None:
+                if pending.get("wu_digest") != wu_digest:
+                    raise RuntimeError("pending result belongs to different work")
+                return self._submit_pending_result(pending, client)
 
-            # Mark seen only AFTER a successful core POST: a transient delivery
-            # failure leaves the WU eligible for a later retry.
-            self._mark_seen(wu)
-            self._report_activity(
-                wu_id=wu_id,
-                agent_pubkey=body["agent_pubkey"],
-                http=client,
+            payload = wu.get("payload")
+            result = self._classifier.classify(
+                self._payload_text(payload), self._payload_lang(payload)
             )
+            labels = [result.label]
+            score = float(result.score)
+            signed_payload = {"wu_id": wu_id, "labels": labels, "score": score}
+            result_bytes = json.dumps(
+                signed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            agent_sig = base64.b64encode(self._keys.sign(result_bytes)).decode()
+            result_body = {
+                "labels": labels,
+                "score": score,
+                "agent_pubkey": self._keys.public_key_raw_b64(),
+                "agent_sig": agent_sig,
+            }
+            text_preview = (self._payload_text(payload) or "")[:200]
+            pending_record = {
+                "event": "wu_result_pending",
+                "wu_id": wu_id,
+                "wu_digest": wu_digest,
+                "nonce": wu.get("nonce"),
+                "result_body": result_body,
+                "text_preview": text_preview,
+            }
+            self._joblog.append(pending_record)
+            return self._submit_pending_result(pending_record, client)
         finally:
             if owns_client:
                 client.close()
-
-        # Store a text preview for the CLI + joblog inspectability.
-        text_preview = (self._payload_text(payload) or "")[:200]
-        self._joblog.append(
-            {
-                "event": "wu_processed",
-                "wu_id": wu_id,
-                "labels": body["labels"],
-                "score": body["score"],
-                "status": resp.status_code,
-                "text_preview": text_preview,
-            }
-        )
-        # Return the contract body + text_preview (for CLI display only —
-        # text_preview is NOT part of the signed WorkUnitResult and is NOT
-        # POSTed to the core).
-        return {**body, "text_preview": text_preview}
 
     def register_agent(
         self, http: httpx.Client | None = None, invite_token: str = ""
@@ -579,10 +803,36 @@ class NodeAgentClient:
         _validate_http_client(http, "pull_and_process")
         client = http or httpx.Client(timeout=30)
         try:
+            pending = self._pending_result()
+            if pending is not None:
+                return self._submit_pending_result(pending, client)
+
+            pull_timestamp = int(time.time())
+            pull_nonce = secrets.token_hex(16)
+            pull_pubkey = self._keys.public_key_raw_b64()
+            pull_core_key_sha256 = pinned_core_public_key_sha256()
+            pull_signature = base64.b64encode(
+                self._keys.sign(
+                    canonical_pull_bytes(
+                        pull_pubkey,
+                        pull_timestamp,
+                        pull_nonce,
+                        pull_core_key_sha256,
+                        self._tenant,
+                    )
+                )
+            ).decode()
+            pull_headers = {
+                "X-Lustro-Agent-Pubkey": pull_pubkey,
+                "X-Lustro-Agent-Timestamp": str(pull_timestamp),
+                "X-Lustro-Agent-Nonce": pull_nonce,
+                "X-Lustro-Agent-Signature": pull_signature,
+                "X-Lustro-Agent-Tenant": self._tenant,
+            }
             # Check if client supports streaming
             if hasattr(client, 'stream'):
                 # httpx.Client path: true streaming with size check BEFORE append
-                with client.stream("GET", url) as resp:
+                with client.stream("GET", url, headers=pull_headers) as resp:
                     if resp.status_code == 204:
                         self._joblog.append({"event": "no_work"})
                         return None
@@ -604,7 +854,7 @@ class NodeAgentClient:
                 # NOTE: This does NOT protect against huge responses filling memory
                 # because fetch() loads the full body before we can check.
                 # Store in local variable to prevent TOCTOU
-                resp = client.get(url)
+                resp = client.get(url, headers=pull_headers)
                 if resp.status_code == 204:
                     self._joblog.append({"event": "no_work"})
                     return None

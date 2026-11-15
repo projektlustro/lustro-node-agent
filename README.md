@@ -44,9 +44,11 @@ test, not just asserted here.
 ## How the loop works (FROZEN wu contract)
 
 ```
-POST /v1/wu/register-agent  -> registers your agent_pubkey (first run only)
-GET  /v1/wu                 -> WorkUnit  {wu_id, kind, payload, core_pubkey_id, core_sig}
-POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agent_sig}
+POST /v1/wu/register-agent -> registers your agent_pubkey (first run only)
+GET  /v1/wu                 -> signed work-unit request in X-Lustro-Agent-* headers
+                           <- WorkUnit {wu_id, kind, payload, core_pubkey_id, core_sig}
+POST /v1/wu/{id}/result     <- signed WorkUnitResult {labels, score, agent_pubkey, agent_sig}
+                           -> signed Core success or terminal receipt
 ```
 
 0. **Register** (first run only): POST your local public key to
@@ -57,17 +59,33 @@ POST /v1/wu/{id}/result     <- WorkUnitResult {labels, score, agent_pubkey, agen
    (e.g. the edge is unreachable, the invite is missing/invalid, or the edge
    returns a server error), `run` exits with a clear error naming this URL —
    that's what you're seeing if this is the first thing that fails.
-1. **Pull** the next work unit from the edge.
-2. **Verify** `core_sig` against the pinned core public key (reject on key-id
+1. **Pull** with the local key signing a timestamp, one-use nonce, configured
+   tenant, and SHA-256 of the pinned Core public key. The proof travels in
+   `X-Lustro-Agent-*` headers, not the URL. Core persists consumed nonces until
+   their timestamps cannot pass validation, including across restarts. Production
+   Core accepts only registered keys bound to trusted principals.
+2. **Verify** `core_sig` against the pinned Core public key (reject on key-id
    mismatch or bad signature).
 3. **Anti-replay**: a repeated `wu_id` (or `nonce`, if present) is refused.
 4. **Classify** the payload with the local, artifact-backed multilingual E5
    model. Production runs fail closed if the model artifact is missing or its
    checksum does not match the signed model card; there is no keyword fallback.
 5. **Sign** the result `{wu_id, labels, score}` with your local Ed25519 key.
-6. **POST** the signed `WorkUnitResult` back to the edge.
-7. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id`
+6. Flush and `fsync` the exact signed result to the local job log before POST.
+   Corrupt log records stop processing; delivery failures retry the same result.
+7. **POST** the signed `WorkUnitResult` back to the edge. The Core's signed
+   success acknowledgement binds the work-unit ID, agent signature, and
+   authority; the agent verifies it before clearing the pending result.
+8. A verified signed terminal receipt records permanent conflict, revocation,
+   expiry, lease ownership mismatch, or a source that is no longer eligible.
+   The agent clears that pending result; transient failures retry.
+9. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id`
    idempotently so the volunteer's `/me` dashboard reflects the run.
+
+The CLI displays the authority from the verified Core acknowledgement.
+`authoritative-v1` creates an authoritative detection record;
+`shadow-non-authoritative` stores a shadow without creating a detection;
+`non-authoritative-local-stub` creates no detection.
 
 ## Getting authorized
 
@@ -77,16 +95,21 @@ volunteer program: sign up at [projektlustro.eu](https://projektlustro.eu) to
 be pointed at the current edge URL and issued an **invite token**. The
 production core requires that token on first registration (a single-use,
 operator-minted `invite_id:mac` — see below); a self-generated key with no
-invite cannot enrol, and only enrolled keys can submit results. Pass it via
+invite cannot enrol. Production Core also requires an operator-bound trusted
+principal before accepting pulls or results. Pass the invite via
 `LUSTRO_NODE_INVITE_TOKEN`.
 
 The separate `LUSTRO_NODE_TOKEN` comes from the Node-agent card in your
 authenticated `/me` panel. It attributes accepted work units to that volunteer
 account and can be rotated or revoked without replacing the agent's local
-Ed25519 key. It is never written to the job log. Stronger wire-level agent
-authorization (mTLS or a signed JWT on every core request) is still on the
-roadmap. See "Why this is NOT a botnet" above for what's actually enforced
-right now.
+Ed25519 key. It is never written to the job log and does not authorize Core
+requests. Production pulls use a short-lived signature and one-use nonce from
+the enrolled local key.
+Set the target tenant with `LUSTRO_NODE_TENANT` or `--tenant`; the default is
+`pl`. The value must match the Core serving the edge. The signed pull proof
+binds this tenant to the pinned Core key, so a proof cannot move across Core
+instances or tenants. Core allows at most 10 outstanding leases per trusted
+principal; leases expire after 24 hours.
 
 ## Usage
 
@@ -112,6 +135,7 @@ mkdir -p ~/.lustro-node-agent
 docker run --rm --pull=always --platform linux/amd64 \
   -v ~/.lustro-node-agent:/agent/.lustro-node-agent \
   -e LUSTRO_NODE_EDGE_URL=https://projektlustro.eu \
+  -e LUSTRO_NODE_TENANT=pl \
   -e LUSTRO_NODE_INVITE_TOKEN=REPLACE_WITH_INVITE_TOKEN \
   -e LUSTRO_NODE_TOKEN=REPLACE_WITH_NODE_TOKEN \
   ghcr.io/projektlustro/node-agent:latest
@@ -165,9 +189,9 @@ LUSTRO_NODE_EMBED_CACHE=/Users/jakubsikora/Library/Caches/lustro-fastembed \
 python -m node_agent.cli run --edge https://projektlustro.eu
 ```
 
-`node-agent run` is **one-shot**: it pulls and processes a single work unit,
-then exits. It is not a long-running loop. Schedule step 2 on cron (or a
-systemd timer) for continuous participation.
+`node-agent run` is **one-shot**: it retries one pending result, or pulls and
+processes one work unit, then exits. It is not a long-running loop. Schedule
+step 2 on cron (or a systemd timer) for continuous participation.
 
 `leave` deletes ALL local state (keys + job log) in one command:
 
@@ -231,6 +255,23 @@ empty value. Source runs still need the explicit value shown below.
 arm64 Mac, Docker runs it under emulation — it works, just slower to pull and
 start than a native image would be.
 
+## Browser wheel release
+
+The checked-in wheel contains browser protocol code only. Browser work
+processing is unavailable: no signed Pyodide-compatible model artifact or
+verified inference loader ships. `FailClosedClassifier` raises
+`ModelUnavailable`, and `run_once` refuses before registration or work pulls.
+
+```bash
+cd services/node-agent
+python -m pip wheel --no-deps --wheel-dir dist .
+cp dist/lustro_node_agent-0.1.5-py3-none-any.whl ../../apps/public-site/public/wasm/
+```
+
+Keep the wheel filename, `pyproject.toml` version, and `AGENT_WHEEL` in
+`apps/public-site/app/node/page.tsx` aligned. Build and copy the wheel before
+publishing the page that references it.
+
 ## Test
 
 Running from source — for contributors, or if you'd rather not use Docker:
@@ -255,11 +296,9 @@ requests, and the end-to-end loop against a mock edge.
 ## Security Limitations
 
 ### Browser WASM Node
-The browser-based WASM node has an inherent limitation: it cannot enforce
-`MAX_WU_RESPONSE_BYTES` at fetch time. The browser's fetch API loads the entire
-response body into memory before the agent can check its size. While the agent
-still rejects work units that exceed the size limit, a hostile edge could
-send an oversized response that exhausts browser memory.
-
-The Docker and source (CLI) agents do NOT have this limitation — they use
-httpx with true streaming and enforce the size limit incrementally.
+The browser worker does not currently register or pull work. Its fail-closed
+classifier requires a signed model bundle that runs under Pyodide, plus a
+browser loader that verifies the signed manifest and every artifact before
+inference. The native `ModelClassifier` depends on `fastembed`, `joblib`,
+`numpy`, and a preloaded E5 ONNX cache; those native dependencies and model
+files are not packaged as browser assets.

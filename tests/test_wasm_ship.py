@@ -89,7 +89,12 @@ def wasm_env(tmp_path, monkeypatch):
 
 def _make_node(env):
     idb, _fetch = env
-    node = wasm._BrowserNode("https://projektlustro.eu", lambda m: None, wasm.BrowserStore())
+    node = wasm._BrowserNode(
+        "https://projektlustro.eu",
+        lambda m: None,
+        wasm.BrowserStore(),
+        "pl",
+    )
     # Seed a keyring so sign() works.
     seed = ed.generate_seed()
     node._seed = seed
