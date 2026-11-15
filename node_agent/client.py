@@ -81,7 +81,7 @@ class HttpClient(Protocol):
         """Fetch a URL via GET."""
         ...
     
-    def post(self, url: str, json: Any) -> _Response:
+    def post(self, url: str, json: Any, *, headers: dict[str, str] | None = None) -> _Response:
         """POST JSON to a URL."""
         ...
     
@@ -119,7 +119,6 @@ _SUCCESS_AUTHORITIES = frozenset(
         "non-authoritative-local-stub",
     }
 )
-
 # The WU payload text is adversary-controlled (it originates from scraped
 # content). Cap the length we ever hand to the classifier so a giant `text`
 # field can't drive the volunteer's CPU/RAM to exhaustion.
@@ -285,7 +284,6 @@ def canonical_terminal_bytes(receipt: dict) -> bytes:
         ensure_ascii=False,
     ).encode("utf-8")
 
-
 class NodeAgentClient:
     def __init__(
         self,
@@ -316,7 +314,7 @@ class NodeAgentClient:
         *,
         wu_id: str,
         agent_pubkey: str,
-        http: httpx.Client,
+        http: HttpClient,
     ) -> None:
         """Attribute an accepted result to the volunteer's `/me` account.
 
@@ -638,7 +636,7 @@ class NodeAgentClient:
             "authority": ack["authority"],
         }
 
-    def process_wu(self, wu: dict, http: httpx.Client | None = None) -> dict:
+    def process_wu(self, wu: dict, http: HttpClient | None = None) -> dict:
         """Verify, classify, sign and submit a single work unit.
 
         A signed result is persisted before POST and replayed byte-for-byte
@@ -657,6 +655,7 @@ class NodeAgentClient:
         if not all(c in ALLOWED_WU_ID_CHARS for c in wu_id):
             raise CorePinError("work unit wu_id contains invalid characters")
 
+
         for field in ("kind", "payload", "core_pubkey_id"):
             if field not in wu:
                 raise CorePinError(f"work unit missing {field}")
@@ -670,7 +669,6 @@ class NodeAgentClient:
         if self._seen(wu) and pending is None:
             self._joblog.append({"event": "replay_rejected", "wu_id": wu_id})
             raise ReplayError(f"work unit already processed: {wu_id}")
-
         try:
             core_sig = base64.b64decode(wu["core_sig"], validate=True)
         except (KeyError, binascii.Error, ValueError) as e:
@@ -678,7 +676,6 @@ class NodeAgentClient:
         canonical = canonical_wu_bytes(wu)
         verify_wu_signature(canonical, core_sig, wu.get("core_pubkey_id", ""))
         wu_digest = hashlib.sha256(canonical).hexdigest()
-
         owns_client = http is None
         _validate_http_client(http, "process_wu")
         client = http or httpx.Client(timeout=30)
@@ -720,8 +717,9 @@ class NodeAgentClient:
             if owns_client:
                 client.close()
 
+
     def register_agent(
-        self, http: httpx.Client | None = None, invite_token: str = ""
+        self, http: HttpClient | None = None, invite_token: str = ""
     ) -> None:
         """Register this node with the edge on first run.
 
@@ -784,7 +782,7 @@ class NodeAgentClient:
             
         self._joblog.append({"event": "agent_registered", "agent_pubkey": body["agent_pubkey"]})
 
-    def pull_and_process(self, http: httpx.Client | None = None) -> dict | None:
+    def pull_and_process(self, http: HttpClient | None = None) -> dict | None:
         """Pull one WU from the edge and process it; None if no work (204).
 
         Opted-in scraping (plan §6): scrape-kind work units are refused unless
@@ -881,7 +879,7 @@ class NodeAgentClient:
 
     def _ship_logs(
         self,
-        http: httpx.Client | None = None,
+        http: HttpClient | None = None,
         shipped_path: Path | None = None,
     ) -> None:
         """Best-effort push of the joblog to the central log wall.

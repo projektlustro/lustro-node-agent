@@ -75,5 +75,4 @@ class EgressGuard:
                 f"egress refused: {url!r} effective port {effective_port} != allowlisted port "
                 f"{self._port} (outbound-only guarantee)"
             )
-
         return url

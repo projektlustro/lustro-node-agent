@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lustro-node-agent"
 version = "0.1.5"
-description = "Volunteer-run, sandboxed classifier for LUSTRO."
+description = "Volunteer-run, sandboxed classifier for LUSTRO with CLI and in-browser WASM support."
 requires-python = ">=3.11"
 license-files = ["LICENSE"]
 # Deliberately empty: the wheel is installed by micropip into Pyodide, where

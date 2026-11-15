@@ -86,7 +86,6 @@ def pinned_core_public_key_sha256() -> str:
         raise CorePinError("pinned core key is not a valid raw Ed25519 key")
     return hashlib.sha256(raw).hexdigest()
 
-
 def _load_pinned_public_key(raw_b64: str):
     # Lazy import: cryptography is native and unavailable under Pyodide. The WASM
     # node never calls this (it uses node_agent.crypto.pure_verify_wu_signature),

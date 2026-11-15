@@ -48,7 +48,7 @@ POST /v1/wu/register-agent -> registers your agent_pubkey (first run only)
 GET  /v1/wu                 -> signed work-unit request in X-Lustro-Agent-* headers
                            <- WorkUnit {wu_id, kind, payload, core_pubkey_id, core_sig}
 POST /v1/wu/{id}/result     <- signed WorkUnitResult {labels, score, agent_pubkey, agent_sig}
-                           -> signed Core success or terminal receipt
+                           -> signed Core success acknowledgement or terminal receipt
 ```
 
 0. **Register** (first run only): POST your local public key to
@@ -59,11 +59,12 @@ POST /v1/wu/{id}/result     <- signed WorkUnitResult {labels, score, agent_pubke
    (e.g. the edge is unreachable, the invite is missing/invalid, or the edge
    returns a server error), `run` exits with a clear error naming this URL —
    that's what you're seeing if this is the first thing that fails.
-1. **Pull** with the local key signing a timestamp, one-use nonce, configured
-   tenant, and SHA-256 of the pinned Core public key. The proof travels in
-   `X-Lustro-Agent-*` headers, not the URL. Core persists consumed nonces until
-   their timestamps cannot pass validation, including across restarts. Production
-   Core accepts only registered keys bound to trusted principals.
+1. **Pull** the next work unit from the edge with the local key signing a timestamp,
+   one-use nonce, configured tenant, and SHA-256 of the pinned Core public key.
+   The proof travels in `X-Lustro-Agent-*` headers, not the URL. Core persists
+   consumed nonces until their timestamps cannot pass validation, including
+   across restarts. Production Core accepts only registered keys bound to
+   trusted principals.
 2. **Verify** `core_sig` against the pinned Core public key (reject on key-id
    mismatch or bad signature).
 3. **Anti-replay**: a repeated `wu_id` (or `nonce`, if present) is refused.
@@ -79,8 +80,8 @@ POST /v1/wu/{id}/result     <- signed WorkUnitResult {labels, score, agent_pubke
 8. A verified signed terminal receipt records permanent conflict, revocation,
    expiry, lease ownership mismatch, or a source that is no longer eligible.
    The agent clears that pending result; transient failures retry.
-9. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id`
-   idempotently so the volunteer's `/me` dashboard reflects the run.
+9. When `LUSTRO_NODE_TOKEN` is set, report the accepted `wu_id` idempotently so
+   the volunteer's `/me` dashboard reflects the run.
 
 The CLI displays the authority from the verified Core acknowledgement.
 `authoritative-v1` creates an authoritative detection record;
@@ -96,7 +97,8 @@ be pointed at the current edge URL and issued an **invite token**. The
 production core requires that token on first registration (a single-use,
 operator-minted `invite_id:mac` — see below); a self-generated key with no
 invite cannot enrol. Production Core also requires an operator-bound trusted
-principal before accepting pulls or results. Pass the invite via
+principal before accepting pulls or results; only enrolled keys can submit
+results. Pass the invite via
 `LUSTRO_NODE_INVITE_TOKEN`.
 
 The separate `LUSTRO_NODE_TOKEN` comes from the Node-agent card in your
@@ -302,3 +304,10 @@ browser loader that verifies the signed manifest and every artifact before
 inference. The native `ModelClassifier` depends on `fastembed`, `joblib`,
 `numpy`, and a preloaded E5 ONNX cache; those native dependencies and model
 files are not packaged as browser assets.
+
+If browser work is enabled, the browser-based WASM node cannot enforce
+`MAX_WU_RESPONSE_BYTES` at fetch time. The browser's fetch API loads the entire
+response body into memory before the agent can check its size, so a hostile
+edge could exhaust browser memory. The Docker and source (CLI) agents do not
+have this limitation; they use httpx with true streaming and enforce the size
+limit incrementally.

@@ -70,7 +70,7 @@ def _print_fail(msg: str) -> None:
 
 def _authority_summary(authority: str) -> str:
     return {
-        "authoritative-v1": "stored as detection record",
+        "authoritative-v1": "stored as detection record (pending_review)",
         "shadow-non-authoritative": (
             "stored as non-authoritative shadow; no detection created"
         ),
@@ -203,7 +203,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     _print_ok(f"multilingual E5 model → {result['labels'][0]} ({result['score']:.3f})")
 
     _print_step(4, "Submitting signed result to core")
-    _print_ok(f"result status: {_authority_summary(authority)}")
+    _print_ok(f"accepted → {_authority_summary(authority)}")
 
     _print_result(result["labels"], result["score"], text_preview, authority)
     _print_next_steps()

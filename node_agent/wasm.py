@@ -1,8 +1,8 @@
 """Pyodide entry point for the browser node-agent protocol.
 
-Browser transport, storage, and cryptographic paths use the native client.
-Classification remains unavailable until a signed Pyodide-compatible model
-bundle and verified inference loader are shipped.
+The browser uses the shared NodeAgentClient with pure-Python crypto, FetchBackend,
+and IndexedDB storage. Classification stays disabled until a signed,
+Pyodide-compatible model bundle and verified inference loader ship.
 """
 
 from __future__ import annotations

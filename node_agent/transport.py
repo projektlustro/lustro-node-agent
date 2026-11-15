@@ -42,7 +42,7 @@ class HttpClient(Protocol):
     """Protocol defining the interface expected from HTTP clients."""
     
     def get(self, url: str, *, headers: dict[str, str] | None = None) -> _Response: ...
-    def post(self, url: str, json: Any) -> _Response: ...
+    def post(self, url: str, json: Any, *, headers: dict[str, str] | None = None) -> _Response: ...
     def close(self) -> None: ...
     def stream(
         self, method: str, url: str, *, headers: dict[str, str] | None = None
@@ -62,8 +62,10 @@ class HttpxBackend:
     ) -> _Response:
         return self._client.get(url, headers=headers)
 
-    def post(self, url: str, json: Any) -> _Response:
-        return self._client.post(url, json=json)
+    def post(
+        self, url: str, json: Any, *, headers: dict[str, str] | None = None
+    ) -> _Response:
+        return self._client.post(url, json=json, headers=headers)
 
     def stream(
         self, method: str, url: str, *, headers: dict[str, str] | None = None
@@ -260,8 +262,10 @@ class FetchBackend:
     ) -> _FetchResponse:
         return self._fetch(url, method="GET", body=None, headers=headers)
 
-    def post(self, url: str, json: Any) -> _FetchResponse:
-        return self._fetch(url, method="POST", body=js_dumps(json))
+    def post(
+        self, url: str, json: Any, *, headers: dict[str, str] | None = None
+    ) -> _FetchResponse:
+        return self._fetch(url, method="POST", body=js_dumps(json), headers=headers)
 
     def stream(
         self, method: str, url: str, *, headers: dict[str, str] | None = None
