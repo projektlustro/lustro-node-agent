@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM dhi.io/python:3.13-dev AS build
+FROM dhi.io/python:3.12-dev AS build
 WORKDIR /agent
 ENV HOME=/agent
 ENV HF_HOME=/agent/.cache/huggingface
@@ -9,7 +9,7 @@ RUN PYTHONPATH=/agent/deps python -c \
     "from transformers import AutoModel, AutoTokenizer; model='PKOBP/embed-modernbert-395m'; AutoTokenizer.from_pretrained(model); AutoModel.from_pretrained(model)" \
     && chmod -R a+rX /agent/.cache
 
-FROM dhi.io/python:3.13
+FROM dhi.io/python:3.12
 WORKDIR /agent
 ENV HOME=/agent
 ENV PYTHONPATH=/agent/deps
