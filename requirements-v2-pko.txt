@@ -1,0 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+cryptography==46.0.4
+httpx==0.28.1
+torch==2.9.1+cpu
+transformers==4.57.3

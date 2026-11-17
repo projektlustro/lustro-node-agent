@@ -165,6 +165,67 @@ docker run --rm --pull=always --platform linux/amd64 \
   ghcr.io/projektlustro/node-agent:latest
 ```
 
+## Core v2 embedding workers
+
+The Core v2 worker handles signed, pure-compute embedding units. It runs beside
+the volunteer v1 client and does not replace `node-agent run`.
+
+Each worker key must be bound by an operator with tier `core`, role `worker` or
+`studio`, and permitted tags. Core intersects requested tags with enrolled tags.
+
+Install the worker entry point and matching inference dependencies:
+
+```bash
+python -m pip install -e . -r requirements-v2-e5.txt
+```
+
+Use `requirements-v2-pko.txt` for PKO. Source runs need cached model files;
+missing files fail closed. Docker image builds preload them.
+
+Generate the local key and display its binding identifiers:
+
+```bash
+python -c 'import hashlib; from pathlib import Path; from node_agent.keys import ensure_keypair; k=ensure_keypair(Path.home()/".lustro-node-agent"/"agent_ed25519.key"); print("key_id=ed25519-"+hashlib.sha256(k.public_key().public_bytes_raw()).hexdigest()[:16]); print("pubkey_b64="+k.public_key_raw_b64())'
+```
+
+Only share `key_id` and `pubkey_b64` with the operator. Never share the private
+key file. Use HTTPS for remote Core URLs; TLS authenticates Core responses.
+
+Build the model-specific images. Their CI publishes `latest` and commit-SHA tags
+to GHCR. Each image includes its model files and runs in offline mode:
+
+```bash
+docker build -f Dockerfile.nlp-e5 -t ghcr.io/projektlustro/node-agent-nlp-e5:latest .
+docker build -f Dockerfile.nlp-pko -t ghcr.io/projektlustro/node-agent-nlp-pko:latest .
+```
+
+Run an enrolled E5 worker:
+
+```bash
+lustro-node-agent v2 run \
+  --core https://projektlustro.eu \
+  --key-file ~/.lustro-node-agent/agent_ed25519.key \
+  --tags model:e5-large \
+  --idle-sleep 5
+```
+
+Use `--tags model:pko-395m` for PKO. Use `--once` to process at most one unit.
+The Studio worker can add `--role-fallback-seconds 900`; Core clamps its value.
+Claims with no work return HTTP 204. Each request signs method, exact target,
+key ID, timestamp, request ID, and body digest. The worker verifies canonical
+input digest before inference. It heartbeats every 30 seconds, then posts output
+with lease ID and generation. Continuous runs retry connection, 5xx, and 409
+failures with 1–60-second backoff; `--once` exits nonzero on transient failures.
+V2 activity does not appear in the v1 `dump-log` or serve dashboard.
+
+The producer supplies model prefixes. E5 uses FastEmbed 0.5.1 with the persisted
+CLS-pooled geometry. PKO uses `[cls]` input, CLS-token pooling, and L2
+normalization. Do not add prefixes in the worker.
+
+Install dependencies for source runs with `requirements-v2-e5.txt` or
+`requirements-v2-pko.txt`. Runtime model loading is lazy and only loads models
+for configured tags.
+
 ### Model artifact
 
 The production agent requires `LUSTRO_NODE_MODEL_ROOT` containing the model

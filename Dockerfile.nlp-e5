@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+FROM dhi.io/python:3.13-dev AS build
+WORKDIR /agent
+ENV HOME=/agent
+COPY requirements-v2-e5.txt .
+RUN pip install --no-cache-dir --target=/agent/deps -r requirements-v2-e5.txt
+RUN PYTHONPATH=/agent/deps python -c \
+    "from fastembed import TextEmbedding; TextEmbedding(model_name='intfloat/multilingual-e5-large')" \
+    && chmod -R a+rX /agent/.cache
+
+FROM dhi.io/python:3.13
+WORKDIR /agent
+ENV HOME=/agent
+ENV PYTHONPATH=/agent/deps
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+COPY --from=build /agent/deps /agent/deps
+COPY --from=build /agent/.cache /agent/.cache
+COPY node_agent/ ./node_agent/
+ENTRYPOINT ["python", "-m", "node_agent.cli"]
+CMD ["v2", "run"]

@@ -210,6 +210,36 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_v2_run(args: argparse.Namespace) -> int:
+    from node_agent.v2 import EmbeddingHandlers, V2Client
+
+    tags = [tag.strip() for value in args.tags for tag in value.split(",") if tag.strip()]
+    if not tags:
+        _print_fail("at least one worker tag is required")
+        return 2
+    client = None
+    try:
+        keys = ensure_keypair(args.key_file)
+        handlers = EmbeddingHandlers(tags)
+        client = V2Client(
+            args.core,
+            keys,
+            tags=tags,
+            handlers=handlers,
+            role_fallback_seconds=args.role_fallback_seconds,
+        )
+        client.run(once=args.once, idle_sleep=args.idle_sleep)
+    except Exception as exc:
+        _print_fail(f"v2 worker failed: {type(exc).__name__}: {exc}")
+        return 2
+    finally:
+        if client is not None:
+            client.close()
+    return 0
+
+
+
+
 def cmd_dump_log(args: argparse.Namespace) -> int:
     """Print the local job log so the volunteer can inspect every job."""
     joblog = JobLog(DEFAULT_JOBLOG_PATH)
@@ -301,6 +331,18 @@ def build_parser() -> argparse.ArgumentParser:
         "(bounded adapter for verified ephemeral/Serverless paths; plan §1a.4)"
     )
     run_p.set_defaults(func=cmd_run)
+
+    v2_p = sub.add_parser("v2", help="run the signed Core v2 worker")
+    v2_sub = v2_p.add_subparsers(dest="v2_command", required=True)
+    v2_run_p = v2_sub.add_parser("run", help="claim and process Core v2 work")
+    v2_run_p.add_argument("--core", required=True, help="Core base URL")
+    v2_run_p.add_argument("--key-file", required=True, help="local Ed25519 private key")
+    v2_run_p.add_argument("--tags", nargs="+", action="extend", required=True, help="worker capability tags")
+    v2_run_p.add_argument("--role-fallback-seconds", type=int)
+    v2_run_p.add_argument("--once", action="store_true", help="process at most one work unit")
+    v2_run_p.add_argument("--idle-sleep", type=float, default=5, help="seconds between empty claims")
+    v2_run_p.set_defaults(func=cmd_v2_run)
+
 
     dump_p = sub.add_parser("dump-log", help="print the local job log")
     dump_p.set_defaults(func=cmd_dump_log)

@@ -16,6 +16,7 @@ dependencies = []
 
 [project.scripts]
 node-agent = "node_agent.cli:main"
+lustro-node-agent = "node_agent.cli:main"
 
 [tool.setuptools]
 packages = ["node_agent"]
