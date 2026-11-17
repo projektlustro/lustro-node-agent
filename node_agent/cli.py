@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 from node_agent.classifier import ModelClassifier, StubClassifier
@@ -182,6 +183,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         _print_step(1, "Agent already registered")
         _print_ok(f"key {pubkey[:16]}... loaded from disk")
 
+    if not args.loop:
+        return _run_single(args, client)
+    return _run_loop(args, client)
+
+
+MAX_LOOP_ERRORS = 20
+
+
+def _run_single(args: argparse.Namespace, client: NodeAgentClient) -> int:
     _print_step(2, "Pulling work unit from core")
     result = client.pull_and_process()
     if result is None:
@@ -208,6 +218,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     _print_result(result["labels"], result["score"], text_preview, authority)
     _print_next_steps()
     return 0
+
+
+def _run_loop(args: argparse.Namespace, client: NodeAgentClient) -> int:
+    if args.interval <= 0:
+        print("error: --interval must be positive", file=sys.stderr)
+        return 2
+    consecutive_errors = 0
+    while True:
+        try:
+            rc = _run_single(args, client)
+            consecutive_errors = 0
+            if rc != 0:
+                return rc
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            consecutive_errors += 1
+            _print_fail(
+                f"cycle failed ({consecutive_errors}/{MAX_LOOP_ERRORS}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            if consecutive_errors >= MAX_LOOP_ERRORS:
+                return 1
+        time.sleep(args.interval)
 
 
 def cmd_v2_run(args: argparse.Namespace) -> int:
@@ -329,6 +363,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--once", action="store_true",
         help="claim at most one compatible work unit and exit "
         "(bounded adapter for verified ephemeral/Serverless paths; plan §1a.4)"
+    )
+    run_p.add_argument(
+        "--loop", action="store_true",
+        help="keep running: poll-pull-sleep until killed; transient errors "
+        "back off, MAX_LOOP_ERRORS consecutive failures exit non-zero"
+    )
+    run_p.add_argument(
+        "--interval", type=float, default=300.0,
+        help="seconds between poll cycles in --loop mode (default 300)"
     )
     run_p.set_defaults(func=cmd_run)
 
