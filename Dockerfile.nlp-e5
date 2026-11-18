@@ -2,6 +2,7 @@
 FROM dhi.io/python:3.12-dev AS build
 WORKDIR /agent
 ENV HOME=/agent
+ENV FASTEMBED_CACHE_PATH=/agent/.cache/fastembed
 COPY requirements-v2-e5.txt .
 RUN pip install --no-cache-dir --target=/agent/deps -r requirements-v2-e5.txt
 RUN PYTHONPATH=/agent/deps python -c \
@@ -11,6 +12,7 @@ RUN PYTHONPATH=/agent/deps python -c \
 FROM dhi.io/python:3.12
 WORKDIR /agent
 ENV HOME=/agent
+ENV FASTEMBED_CACHE_PATH=/agent/.cache/fastembed
 ENV PYTHONPATH=/agent/deps
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
