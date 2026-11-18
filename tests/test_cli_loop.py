@@ -99,6 +99,48 @@ def test_loop_exits_nonzero_after_consecutive_error_cap(tmp_path, monkeypatch):
     assert calls["pulls"] == cap
 
 
+def test_loop_error_backoff_escalates_and_caps(tmp_path, monkeypatch):
+    _patch_state(tmp_path, monkeypatch)
+    sleeps = []
+    calls = {"pulls": 0}
+
+    def _always_fails(self, http=None):
+        calls["pulls"] += 1
+        if calls["pulls"] > 5:
+            raise KeyboardInterrupt
+        raise ConnectionError("edge flake")
+
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", _always_fails)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: sleeps.append(s))
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["run", "--stub", "--loop", "--interval", "10"])
+
+    assert sleeps == [10, 20, 30, 40, 50]
+
+
+def test_loop_error_backoff_resets_on_success(tmp_path, monkeypatch):
+    _patch_state(tmp_path, monkeypatch)
+    sleeps = []
+    calls = {"pulls": 0}
+
+    def _fails_then_recovers(self, http=None):
+        calls["pulls"] += 1
+        if calls["pulls"] == 1:
+            raise ConnectionError("blip")
+        if calls["pulls"] > 3:
+            raise KeyboardInterrupt
+        return None
+
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", _fails_then_recovers)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: sleeps.append(s))
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["run", "--stub", "--loop", "--interval", "10"])
+
+    assert sleeps == [10.0, 10.0, 10.0]
+
+
 def test_loop_error_counter_resets_on_success(tmp_path, monkeypatch):
     _patch_state(tmp_path, monkeypatch)
     calls = {"pulls": 0}
