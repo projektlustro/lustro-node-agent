@@ -184,26 +184,30 @@ def cmd_run(args: argparse.Namespace) -> int:
         _print_ok(f"key {pubkey[:16]}... loaded from disk")
 
     if not args.loop:
-        return _run_single(args, client)
+        rc, _ = _run_single(args, client)
+        return rc
     return _run_loop(args, client)
 
 
 MAX_LOOP_ERRORS = 20
 
 
-def _run_single(args: argparse.Namespace, client: NodeAgentClient) -> int:
+def _run_single(args: argparse.Namespace, client: NodeAgentClient) -> tuple[int, bool]:
+    """Run one pull cycle. Returns (rc, had_work)."""
     _print_step(2, "Pulling work unit from core")
     result = client.pull_and_process()
     if result is None:
         print("      → no work available right now")
         print()
         _print_next_steps()
-        return 0
+        return 0, False
+
+    had_work = result.get("terminal") is not True
 
     if result.get("terminal") is True:
         disposition = result.get("disposition", "unknown")
         _print_ok(f"terminal receipt; work unit ended ({disposition})")
-        return 0
+        return 0, True
     authority = result["authority"]
     _print_ok(f"Core acknowledgement verified (authority={authority})")
 
@@ -217,23 +221,31 @@ def _run_single(args: argparse.Namespace, client: NodeAgentClient) -> int:
 
     _print_result(result["labels"], result["score"], text_preview, authority)
     _print_next_steps()
-    return 0
+    return 0, True
 
 
 def _run_loop(args: argparse.Namespace, client: NodeAgentClient) -> int:
     if args.interval <= 0:
         print("error: --interval must be positive", file=sys.stderr)
         return 2
+    if args.exit_after_no_work_seconds is not None and args.exit_after_no_work_seconds <= 0:
+        print("error: --exit-after-no-work-seconds must be positive", file=sys.stderr)
+        return 2
     consecutive_errors = 0
+    no_work_since: float | None = None
     while True:
+        cycle_start = time.monotonic()
+        got_work = False
+        errored = False
         try:
-            rc = _run_single(args, client)
+            rc, got_work = _run_single(args, client)
             consecutive_errors = 0
             if rc != 0:
                 return rc
         except KeyboardInterrupt:
             raise
         except Exception as exc:
+            errored = True
             consecutive_errors += 1
             _print_fail(
                 f"cycle failed ({consecutive_errors}/{MAX_LOOP_ERRORS}): "
@@ -241,6 +253,13 @@ def _run_loop(args: argparse.Namespace, client: NodeAgentClient) -> int:
             )
             if consecutive_errors >= MAX_LOOP_ERRORS:
                 return 1
+        if args.exit_after_no_work_seconds is not None:
+            if got_work or errored:
+                no_work_since = None
+            elif no_work_since is None:
+                no_work_since = cycle_start
+            elif cycle_start - no_work_since >= args.exit_after_no_work_seconds:
+                return 0
         time.sleep(args.interval)
 
 
@@ -372,6 +391,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--interval", type=float, default=300.0,
         help="seconds between poll cycles in --loop mode (default 300)"
+    )
+    run_p.add_argument(
+        "--exit-after-no-work-seconds", type=float, default=None,
+        help="--loop only: exit 0 once no work has been returned continuously "
+        "for this long (drain-then-exit for ephemeral workers)"
     )
     run_p.set_defaults(func=cmd_run)
 

@@ -123,3 +123,75 @@ def test_loop_rejects_nonpositive_interval(tmp_path, monkeypatch, capsys):
     _patch_state(tmp_path, monkeypatch)
     assert cli.main(["run", "--stub", "--loop", "--interval", "0"]) == 2
     assert "interval" in capsys.readouterr().err
+
+
+def test_loop_rejects_nonpositive_exit_after_no_work(tmp_path, monkeypatch, capsys):
+    _patch_state(tmp_path, monkeypatch)
+    assert cli.main(
+        ["run", "--stub", "--loop", "--exit-after-no-work-seconds", "0"]
+    ) == 2
+    assert "exit-after-no-work" in capsys.readouterr().err
+
+
+def test_loop_drain_exits_after_quiet_window(tmp_path, monkeypatch):
+    _patch_state(tmp_path, monkeypatch)
+    calls = {"pulls": 0, "sleeps": []}
+
+    def _no_work(self, http=None):
+        calls["pulls"] += 1
+        return None
+
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", _no_work)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: calls["sleeps"].append(s))
+
+    # interval=2: cycles at t=0, 2, 4 — quiet window 5s expires on the 4s check
+    # (4 - 0 >= 5 is false → sleeps; next cycle 6 - 0 >= 5 → exits).
+    assert cli.main(
+        ["run", "--stub", "--loop", "--interval", "2",
+         "--exit-after-no-work-seconds", "5"]
+    ) == 0
+    assert calls["pulls"] >= 3
+
+
+def test_loop_drain_keeps_running_when_work_flows(tmp_path, monkeypatch):
+    _patch_state(tmp_path, monkeypatch)
+    calls = {"pulls": 0}
+
+    def _always_work(self, http=None):
+        calls["pulls"] += 1
+        if calls["pulls"] >= 4:
+            raise KeyboardInterrupt
+        return {"labels": ["x"], "score": 0.5, "authority": "core", "text_preview": "t"}
+
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", _always_work)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(
+            ["run", "--stub", "--loop", "--interval", "1",
+             "--exit-after-no-work-seconds", "3"]
+        )
+    assert calls["pulls"] == 4
+
+
+def test_loop_drain_error_resets_quiet_window(tmp_path, monkeypatch):
+    _patch_state(tmp_path, monkeypatch)
+    calls = {"pulls": 0}
+
+    def _flaky_then_quiet(self, http=None):
+        calls["pulls"] += 1
+        if calls["pulls"] % 2 == 1:
+            raise ConnectionError("blip")
+        if calls["pulls"] >= 8:
+            raise KeyboardInterrupt
+        return None
+
+    monkeypatch.setattr(NodeAgentClient, "pull_and_process", _flaky_then_quiet)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(
+            ["run", "--stub", "--loop", "--interval", "1",
+             "--exit-after-no-work-seconds", "2"]
+        )
+    assert calls["pulls"] == 8
