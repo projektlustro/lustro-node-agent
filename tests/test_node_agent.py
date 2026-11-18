@@ -1165,7 +1165,8 @@ def test_pending_result_survives_restart_and_precedes_next_pull(tmp_path, monkey
 
 
 
-def test_unsigned_duplicate_409_clears_pending_result(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status_code", [404, 409])
+def test_unsigned_settle_4xx_clears_pending_result(tmp_path, monkeypatch, status_code):
     priv, pem = _make_core()
     monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
     keys = _agent_keys(tmp_path)
@@ -1200,7 +1201,7 @@ def test_unsigned_duplicate_409_clears_pending_result(tmp_path, monkeypatch):
 
     retry_http = _FakeHttp(
         post_response=_FakePostResponse(
-            status_code=409, body={"detail": "result already recorded"}
+            status_code=status_code, body={"detail": "wu no longer available"}
         )
     )
     out = client.pull_and_process(http=retry_http)
@@ -1209,12 +1210,12 @@ def test_unsigned_duplicate_409_clears_pending_result(tmp_path, monkeypatch):
     assert retry_http.posts == [
         ("https://edge.example.com/v1/wu/wu-dup/result", result_body)
     ]
-    assert out["authority"] == "already-recorded"
+    assert out["authority"] == f"settled-{status_code}"
     assert out["agent_sig"] == result_body["agent_sig"]
     assert "wu-dup" in client._seen_wu_ids
     assert client._pending_result() is None
     events = [row["event"] for row in JobLog(joblog_path).read_all()]
-    assert events.count("wu_result_duplicate") == 1
+    assert events.count("wu_result_settled") == 1
 
 
 @pytest.mark.parametrize(
