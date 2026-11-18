@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+# Serverless drain worker for SCW Serverless Jobs: python-slim base with a
+# shell + awscli so the entrypoint can restore/sync agent state to object
+# storage. Model + embed cache come from the released ghcr image — identical
+# weights, no HuggingFace download at build time.
+FROM ghcr.io/projektlustro/node-agent:latest AS released
+
+FROM python:3.13-slim
+
+WORKDIR /agent
+ENV PYTHONPATH=/agent/deps \
+    HOME=/agent \
+    LUSTRO_NODE_MODEL_ROOT=/agent/model \
+    LUSTRO_NODE_EMBED_CACHE=/agent/embed-cache \
+    LUSTRO_NODE_AGENT_PINNED_KEY_B64=Zb4MWkGcrXN7U/V19Vi7wIHwzPlgqENKuypGr0WoW90=
+
+COPY --from=released /agent/model /agent/model
+COPY --from=released /agent/embed-cache /agent/embed-cache
+
+COPY requirements.txt /tmp/requirements.txt
+RUN grep -vE '^pytest' /tmp/requirements.txt > /tmp/req.txt \
+    && pip install --no-cache-dir --target=/agent/deps -r /tmp/req.txt \
+    && pip install --no-cache-dir "awscli<2" \
+    && rm -rf /root/.cache /tmp/req.txt /tmp/requirements.txt
+
+COPY node_agent/ /agent/node_agent/
+COPY docker/serverless-entrypoint.sh /usr/local/bin/serverless-entrypoint
+RUN chmod 0755 /usr/local/bin/serverless-entrypoint \
+    && mkdir -p /agent/.lustro-node-agent \
+    && chmod -R a+rwX /agent/.lustro-node-agent
+
+ENTRYPOINT ["/usr/local/bin/serverless-entrypoint"]
+CMD ["run", "--loop", "--interval", "10", "--exit-after-no-work-seconds", "300"]
