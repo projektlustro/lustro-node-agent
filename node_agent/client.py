@@ -472,6 +472,7 @@ class NodeAgentClient:
                 "wu_result_pending",
                 "wu_result_acked",
                 "wu_result_terminal",
+                "wu_result_duplicate",
             }:
                 continue
             wu_id = row.get("wu_id")
@@ -609,6 +610,16 @@ class NodeAgentClient:
             return terminal
         ack = self._accept_success_ack(resp, pending, result_body)
         if ack is None:
+            if resp.status_code == 409:
+                self._mark_seen({"wu_id": wu_id, "nonce": pending.get("nonce")})
+                self._joblog.append(
+                    {"event": "wu_result_duplicate", "wu_id": wu_id, "status": 409}
+                )
+                return {
+                    **result_body,
+                    "text_preview": text_preview,
+                    "authority": "already-recorded",
+                }
             resp.raise_for_status()
             raise CorePinError("Core success acknowledgement is invalid")
         self._joblog.append(
