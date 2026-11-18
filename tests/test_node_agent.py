@@ -1165,6 +1165,58 @@ def test_pending_result_survives_restart_and_precedes_next_pull(tmp_path, monkey
 
 
 
+def test_unsigned_duplicate_409_clears_pending_result(tmp_path, monkeypatch):
+    priv, pem = _make_core()
+    monkeypatch.setattr(core_pin, "PINNED_CORE_PUBLIC_KEY_B64", pem)
+    keys = _agent_keys(tmp_path)
+    joblog_path = tmp_path / "joblog.jsonl"
+    seen_path = tmp_path / "seen.jsonl"
+    wu = _signed_wu(
+        priv, {"wu_id": "wu-dup", "kind": "text", "payload": {"text": "hi"}}
+    )
+    client = NodeAgentClient(
+        "https://edge.example.com",
+        StubClassifier(),
+        keys,
+        JobLog(joblog_path),
+        seen_path=seen_path,
+    )
+
+    class _LostResponseHttp:
+        def get(self, _url):
+            raise AssertionError("unexpected GET")
+
+        def post(self, _url, json=None):
+            raise RuntimeError("result response lost")
+
+        def close(self):
+            pass
+
+    with pytest.raises(RuntimeError, match="result response lost"):
+        client.process_wu(wu, http=_LostResponseHttp())
+    pending = client._pending_result()
+    assert pending is not None
+    result_body = pending["result_body"]
+
+    retry_http = _FakeHttp(
+        post_response=_FakePostResponse(
+            status_code=409, body={"detail": "result already recorded"}
+        )
+    )
+    out = client.pull_and_process(http=retry_http)
+
+    assert retry_http.gets == []
+    assert retry_http.posts == [
+        ("https://edge.example.com/v1/wu/wu-dup/result", result_body)
+    ]
+    assert out["authority"] == "already-recorded"
+    assert out["agent_sig"] == result_body["agent_sig"]
+    assert "wu-dup" in client._seen_wu_ids
+    assert client._pending_result() is None
+    events = [row["event"] for row in JobLog(joblog_path).read_all()]
+    assert events.count("wu_result_duplicate") == 1
+
+
 @pytest.mark.parametrize(
     ("disposition", "status_code"),
     [("source_version_changed", 409), ("lease_not_owned", 403)],
