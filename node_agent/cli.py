@@ -189,7 +189,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _run_loop(args, client)
 
 
-MAX_LOOP_ERRORS = 20
+MAX_LOOP_ERRORS = 60
+MAX_ERROR_SLEEP = 60
 
 
 def _run_single(args: argparse.Namespace, client: NodeAgentClient) -> tuple[int, bool]:
@@ -253,6 +254,10 @@ def _run_loop(args: argparse.Namespace, client: NodeAgentClient) -> int:
             )
             if consecutive_errors >= MAX_LOOP_ERRORS:
                 return 1
+            if args.exit_after_no_work_seconds is not None:
+                no_work_since = None
+            time.sleep(min(args.interval * consecutive_errors, MAX_ERROR_SLEEP))
+            continue
         if args.exit_after_no_work_seconds is not None:
             if got_work or errored:
                 no_work_since = None
